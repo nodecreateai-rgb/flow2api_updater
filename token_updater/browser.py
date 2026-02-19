@@ -25,12 +25,15 @@ BROWSER_ARGS = [
     "--disable-sync",
     "--disable-translate",
     "--disable-features=TranslateUI",
+    "--disable-blink-features=AutomationControlled",
     "--no-first-run",
     "--no-default-browser-check",
     "--single-process",  # 单进程模式，省内存
     "--max_old_space_size=128",  # 限制 V8 内存
     "--js-flags=--max-old-space-size=128",
 ]
+
+LOGIN_BROWSER_ARGS = BROWSER_ARGS[:6] + ["--disable-blink-features=AutomationControlled"]
 
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font", "stylesheet"}
 
@@ -273,7 +276,6 @@ class BrowserManager:
                     viewport={"width": 1024, "height": 768},
                     locale="en-US",
                     timezone_id="America/New_York",
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     proxy=proxy,
                     args=BROWSER_ARGS,
                     ignore_default_args=["--enable-automation"],
@@ -340,15 +342,14 @@ class BrowserManager:
                     viewport={"width": 1024, "height": 768},
                     locale="en-US",
                     timezone_id="America/New_York",
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     proxy=proxy,
-                    args=BROWSER_ARGS[:6],  # 登录时不用单进程模式
+                    args=LOGIN_BROWSER_ARGS,
                     ignore_default_args=["--enable-automation"],
                 )
                 self._active_profile_id = profile_id
 
                 page = self._active_context.pages[0] if self._active_context.pages else await self._active_context.new_page()
-                await page.goto(config.login_url, wait_until="networkidle")
+                await page.goto(config.labs_url, wait_until="domcontentloaded")
 
                 logger.info(f"[{profile['name']}] 浏览器已启动，请通过 VNC 登录")
                 return True
@@ -419,7 +420,6 @@ class BrowserManager:
                     viewport={"width": 1024, "height": 768},
                     locale="en-US",
                     timezone_id="America/New_York",
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     proxy=proxy,
                     args=BROWSER_ARGS,  # 完整内存优化参数
                     ignore_default_args=["--enable-automation"],
@@ -463,8 +463,8 @@ class BrowserManager:
                 pass
 
             # 访问 signin 页面并点击 Sign in with Google 按钮刷新 session
-            logger.info(f"[{profile['name']}] 访问 {config.login_url} 刷新 session...")
-            await page.goto(config.login_url, wait_until="domcontentloaded", timeout=60000)
+            logger.info(f"[{profile['name']}] 访问 {config.labs_url} 刷新 session...")
+            await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=60000)
 
             # 点击 Sign in with Google 按钮（提交 POST 表单）
             try:
@@ -483,7 +483,7 @@ class BrowserManager:
                 logger.warning(f"[{profile['name']}] 等待跳转超时: {e}")
 
             # 等待 cookie 更新：优先轮询 session cookie，减少资源占用
-            token = None
+            token = await self._get_session_cookie(context)
             deadline = asyncio.get_running_loop().time() + 12.0
             while asyncio.get_running_loop().time() < deadline:
                 token = await self._get_session_cookie(context)
@@ -563,7 +563,6 @@ class BrowserManager:
                     viewport={"width": 1024, "height": 768},
                     locale="en-US",
                     timezone_id="America/New_York",
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     proxy=proxy,
                     args=BROWSER_ARGS,
                     ignore_default_args=["--enable-automation"],
