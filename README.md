@@ -1,78 +1,247 @@
 # Flow2API Token Updater v3.3
 
-轻量版 Token 自动更新工具，通过 Playwright 持久化 Profile 管理
-Google Labs 登录状态，并用 Headless 模式定时刷新 Token。
+Flow2API Token Updater is a lightweight multi-profile token refresh tool.
+It uses Playwright persistent browser profiles to keep Google Labs login
+sessions alive, extracts session tokens when needed, and pushes them to
+Flow2API.
 
-## 特性
+This version focuses on three things:
 
-- 🪶 轻量化：VNC/Xvfb/noVNC 按需启动（仅登录时运行），降低常驻内存占用
-- 🔄 自动刷新：按目标地址分组检查，只刷新需要更新的 Token
-- 👥 多 Profile：支持管理多个账号（Profile 级隔离）
-- 🌐 代理支持：每个 Profile 可配置独立代理
-- 🎯 目标覆盖：每个 Profile 可单独设置 Flow2API 地址与连接 Token 覆盖
-- 🖥️ 可视化登录：需要时开启 VNC 登录，关闭浏览器后自动停止以省内存
-- 📊 可视化仪表盘：支持同步活动、Profile 排行与近期动态展示
+- multi-profile account management
+- per-profile Flow2API target override
+- a realtime dashboard with charts and recent activity
 
-## 快速开始
+## Highlights
+
+- Lightweight runtime: VNC/Xvfb/noVNC only starts when login is needed
+- Smart sync: profiles are grouped by effective Flow2API URL and token
+- Per-profile overrides: each profile can override target URL and token
+- Proxy support: each profile can use its own proxy
+- Cookie import: recover login state without opening the browser
+- Realtime dashboard: SSE-first updates with polling fallback
+- Chart ranges: 6h / 24h / 72h / 7d
+- Built-in analytics: sync activity, failure reasons, target distribution
+
+## How it works
+
+1. Each account is stored as an isolated Profile.
+2. Browser state is persisted in `profiles/`.
+3. During sync, the effective target is resolved as:
+   - `profile.flow2api_url` or global `FLOW2API_URL`
+   - `profile.connection_token_override` or global `CONNECTION_TOKEN`
+4. Active profiles are grouped by effective target URL + effective token.
+5. Each group calls Flow2API `check-tokens` first.
+6. Only profiles that need refresh are synced.
+7. If target-side checking fails, the group falls back to force sync.
+8. Every sync result is stored as history for the dashboard.
+
+## Quick start
+
+### 1. Clone and configure
 
 ```bash
-# 克隆仓库
 git clone https://github.com/genz27/flow2api_tupdater.git
 cd flow2api_tupdater
-
-# 配置环境变量
 cp .env.example .env
-# 编辑 .env 设置 ADMIN_PASSWORD 等
+```
 
-# 启动（或更新后重建）
+At minimum, set these values in `.env`:
+
+- `ADMIN_PASSWORD`
+- `FLOW2API_URL`
+- `CONNECTION_TOKEN`
+
+### 2. Start the service
+
+```bash
 docker compose up -d --build
 ```
 
-访问 http://localhost:8002 进入管理界面。
+### 3. Access the app
 
-## 使用流程
+- Admin UI: `http://localhost:8002`
+- noVNC: `http://localhost:6080/vnc.html`
 
-1. 创建 Profile
-2. 点击「登录」→ 打开 VNC 完成 Google 登录
-3. 点击「关闭浏览器」保存状态（VNC 会自动停止以节省内存）
-4. 配置全局默认 Flow2API 连接信息（`FLOW2API_URL` / `CONNECTION_TOKEN`）
-5. 如需把某个账号推送到其他实例，可在 Profile 编辑页覆盖目标地址 / Token
-6. 开始自动同步
+> Port `6080` is only relevant when VNC login is enabled and in use.
 
-## 环境变量
+## Common workflows
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| ADMIN_PASSWORD | 管理界面密码 | admin123 |
-| API_KEY | 外部 API 密钥 | - |
-| FLOW2API_URL | 全局默认 Flow2API 地址 | http://host.docker.internal:8000 |
-| CONNECTION_TOKEN | 全局默认 Flow2API 连接 Token | - |
-| REFRESH_INTERVAL | 刷新间隔(分钟) | 60 |
-| ENABLE_VNC | 是否启用 VNC 登录入口(1/0) | 1 |
-| VNC_PASSWORD | VNC 密码（开启 VNC 时使用） | flow2api |
+### Workflow A: login via VNC
 
-## API
+1. Open the admin UI.
+2. Configure the global default Flow2API URL and token.
+3. Create a Profile.
+4. Click `Login` to launch the browser.
+5. Finish Google login in noVNC.
+6. Click `Close Browser` to persist the session state.
+7. Run one manual sync to verify the account works.
+8. Let the scheduled job handle later refreshes.
 
-### 外部 API (需要 X-API-Key)
+### Workflow B: import cookies
 
-- `GET /v1/profiles` - 列出所有 Profile
-- `GET /v1/profiles/{id}/token` - 获取 Token
-- `POST /v1/profiles/{id}/sync` - 同步到 Flow2API
+1. Create a Profile.
+2. Open the `Cookie` dialog.
+3. Paste cookie JSON for the `labs.google` domain.
+4. Run `Check Login` or `Sync` to validate the imported session.
 
-### 管理端 API
+### Multi-instance Flow2API setup
 
-- `GET /api/dashboard` - 获取仪表盘聚合数据（概览、图表、近期动态）
+If one account should sync to another Flow2API instance:
 
-## 从 v2.0 升级
+1. Open that profile's edit dialog.
+2. Set `Flow2API URL override`.
+3. If the target instance uses a different token, also set
+   `Connection Token override`.
+4. Save the profile. That profile will now prefer the override values.
 
-v3.2 使用持久化 Profile 登录（按需启停 VNC 以降低内存），并支持
-Profile 级 Flow2API 目标覆盖：
+## Dashboard
 
-1. 备份 `data/` 目录
-2. 拉取新版本
-3. 重新构建镜像
-4. 如需重新授权：进入管理界面逐个 Profile 点击「登录」完成 Google 登录
-5. 如需多实例同步：在 Profile 编辑页设置覆盖地址与连接 Token
+The admin dashboard includes:
+
+- overview metrics
+- sync activity chart with time-range switching
+- status breakdown and profile ranking
+- failure reason aggregation
+- target instance distribution
+- recent activity feed
+- realtime connection state
+
+The frontend prefers SSE updates and automatically falls back to light
+polling if the realtime stream is unavailable.
+
+## Persistence
+
+The default `docker-compose.yml` mounts these directories:
+
+- `./data` -> `/app/data`
+  - `profiles.db`: profile data and sync history
+  - `config.json`: persisted global defaults
+- `./profiles` -> `/app/profiles`
+  - Playwright persistent browser profile data
+- `./logs` -> `/app/logs`
+  - runtime logs
+
+## Environment variables
+
+The following options are actively used by the application:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ADMIN_PASSWORD` | Admin UI password | empty |
+| `API_KEY` | External API key | empty |
+| `FLOW2API_URL` | Global default Flow2API URL | `http://host.docker.internal:8000` |
+| `CONNECTION_TOKEN` | Global default Flow2API token | empty |
+| `REFRESH_INTERVAL` | Scheduled refresh interval in minutes | `60` |
+| `SESSION_TTL_MINUTES` | Admin session TTL, `0` means no expiry | `1440` |
+| `CONFIG_FILE` | Path for persisted global config | `/app/data/config.json` |
+| `API_PORT` | HTTP listen port | `8002` |
+| `ENABLE_VNC` | Enable VNC login entry, `1/0` | `1` |
+| `VNC_PASSWORD` | Password for noVNC / x11vnc | `flow2api` |
+
+### Configuration precedence
+
+Effective target resolution follows this order:
+
+1. Profile-level `flow2api_url`
+2. Global `FLOW2API_URL`
+
+And for the token:
+
+1. Profile-level `connection_token_override`
+2. Global `CONNECTION_TOKEN`
+
+## API reference
+
+### Admin UI API
+
+Used by the web dashboard:
+
+- `POST /api/login`
+- `POST /api/logout`
+- `GET /api/auth/check`
+- `GET /api/status`
+- `GET /api/dashboard?hours=6|24|72|168`
+- `GET /api/dashboard/stream?session_token=...`
+- `GET /api/config`
+- `POST /api/config`
+- `GET /api/profiles`
+- `POST /api/profiles`
+- `GET /api/profiles/{id}`
+- `PUT /api/profiles/{id}`
+- `DELETE /api/profiles/{id}`
+- `POST /api/profiles/{id}/launch`
+- `POST /api/profiles/{id}/close`
+- `POST /api/profiles/{id}/check-login`
+- `POST /api/profiles/{id}/import-cookies`
+- `POST /api/profiles/{id}/extract`
+- `POST /api/profiles/{id}/sync`
+- `POST /api/sync-all`
+
+### External API
+
+These endpoints require `X-API-Key`:
+
+- `GET /v1/profiles`
+- `GET /v1/profiles/{id}/token`
+- `POST /v1/profiles/{id}/sync`
+- `GET /health`
+
+## Upgrade notes
+
+### Upgrading to v3.3
+
+v3.3 adds:
+
+- profile-level target URL override
+- profile-level token override
+- sync history storage
+- realtime dashboard and SSE stream
+- failure reason aggregation
+- target instance distribution
+- dashboard time-range filters
+
+Recommended upgrade steps:
+
+1. Back up `data/` and `profiles/`.
+2. Pull the latest code.
+3. Rebuild and restart the container.
+4. The app will auto-create new columns and history tables if needed.
+5. Re-check global defaults in the admin UI.
+6. Re-check profile-level overrides if you use multiple Flow2API targets.
+
+## Troubleshooting
+
+### Sync says: incomplete Flow2API URL or token
+
+The effective target config is incomplete. Check:
+
+- the global default target settings
+- the profile-level URL override
+- the profile-level token override
+
+A profile that points to another Flow2API instance usually also needs a
+matching token override.
+
+### Sync says: failed to extract token
+
+The stored browser session is no longer usable. Try one of these:
+
+- login again through VNC
+- import a fresh cookie set
+- run `Check Login` before syncing again
+
+### noVNC does not work
+
+Check:
+
+- `ENABLE_VNC=1`
+- port `6080` is mapped
+- you actually clicked the profile `Login` button
+
+### Changed API_PORT but cannot access the app
+
+If you change the application listen port, make sure you also update the
+port mapping in `docker-compose.yml`.
 
 ## License
 

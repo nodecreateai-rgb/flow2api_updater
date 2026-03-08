@@ -621,6 +621,95 @@ body {
     gap: 12px;
 }
 
+
+.status-ranking-shell {
+    display: grid;
+    grid-template-columns: minmax(220px, 0.82fr) minmax(280px, 1.18fr);
+    gap: 16px;
+    align-items: start;
+}
+
+.status-panel,
+.ranking-panel {
+    display: grid;
+    gap: 14px;
+}
+
+.compact-donut-wrap {
+    justify-items: center;
+    padding: 8px 0 4px;
+}
+
+.compact-donut {
+    width: 156px;
+    height: 156px;
+}
+
+.status-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.status-summary-item {
+    padding: 14px 16px;
+    border-radius: 14px;
+    background: rgba(8, 17, 31, 0.72);
+    border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.status-summary-label {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.status-summary-value {
+    margin-top: 8px;
+    font-size: 26px;
+    font-weight: 700;
+}
+
+.status-summary-item.success .status-summary-value { color: #baf6dd; }
+.status-summary-item.warning .status-summary-value { color: #fde7aa; }
+.status-summary-item.primary .status-summary-value { color: #dae7ff; }
+.status-summary-item.danger .status-summary-value { color: #ffc4d1; }
+
+.ranking-card {
+    display: grid;
+    grid-template-columns: 48px minmax(0, 1fr);
+    gap: 14px;
+    align-items: center;
+    padding: 14px;
+    border-radius: 16px;
+    background: rgba(8, 17, 31, 0.72);
+    border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.ranking-index {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    background: rgba(110, 168, 254, 0.12);
+    border: 1px solid rgba(110, 168, 254, 0.18);
+    color: #dae7ff;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.ranking-body {
+    min-width: 0;
+}
+
+.ranking-progress {
+    margin: 10px 0 8px;
+}
+
+.ranking-meta {
+    font-size: 12px;
+}
+
 .progress-line {
     width: 100%;
     height: 8px;
@@ -751,6 +840,10 @@ body {
     .button-row,
     .chip-row {
         grid-auto-flow: row;
+    }
+
+    .status-ranking-shell {
+        grid-template-columns: 1fr;
     }
 }
 

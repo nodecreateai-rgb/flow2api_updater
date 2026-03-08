@@ -723,45 +723,59 @@ function renderActivityChart(chart, selectedHours) {
 function renderStatusAndRanking(breakdown, topProfiles) {
     const loggedIn = Number(breakdown.logged_in || 0);
     const notLoggedIn = Number(breakdown.not_logged_in || 0);
+    const active = Number(breakdown.active || 0);
+    const inactive = Number(breakdown.inactive || 0);
     const total = Math.max(1, loggedIn + notLoggedIn);
     const ratio = Math.round((loggedIn / total) * 100);
     const donutStyle = `background: conic-gradient(var(--success) 0 ${ratio}%, rgba(148, 163, 184, 0.14) ${ratio}% 100%)`;
     const maxProfileTotal = Math.max(1, ...topProfiles.map((profile) => (profile.sync_count || 0) + (profile.error_count || 0)));
 
+    const statusItems = [
+        { label: "已登录", value: loggedIn, tone: "success" },
+        { label: "未登录", value: notLoggedIn, tone: "warning" },
+        { label: "启用", value: active, tone: "primary" },
+        { label: "停用", value: inactive, tone: "danger" },
+    ];
+
     return `
-        <div class="grid-two chart-inner-grid">
-            <div class="donut-wrap">
-                <div style="position:relative;">
-                    <div class="donut" style="${donutStyle}"></div>
-                    <div class="donut-center">
-                        <div class="donut-value">${ratio}%</div>
-                        <div class="muted">登录有效率</div>
+        <div class="status-ranking-shell">
+            <div class="status-panel">
+                <div class="donut-wrap compact-donut-wrap">
+                    <div style="position:relative;">
+                        <div class="donut compact-donut" style="${donutStyle}"></div>
+                        <div class="donut-center">
+                            <div class="donut-value">${ratio}%</div>
+                            <div class="muted">登录有效率</div>
+                        </div>
                     </div>
                 </div>
-                <div class="legend-list">
-                    ${renderLegend("已登录", loggedIn, "success")}
-                    ${renderLegend("未登录", notLoggedIn, "warning")}
-                    ${renderLegend("启用", breakdown.active || 0, "primary")}
-                    ${renderLegend("停用", breakdown.inactive || 0, "danger")}
+                <div class="status-summary-grid">
+                    ${statusItems.map((item) => `
+                        <div class="status-summary-item ${item.tone}">
+                            <div class="status-summary-label">${item.label}</div>
+                            <div class="status-summary-value">${item.value}</div>
+                        </div>
+                    `).join("")}
                 </div>
             </div>
-            <div class="top-profile-list">
-                ${(topProfiles.length ? topProfiles : []).map((profile) => {
+            <div class="ranking-panel">
+                ${(topProfiles.length ? topProfiles : []).map((profile, index) => {
                     const totalOps = (profile.sync_count || 0) + (profile.error_count || 0);
                     const percent = Math.max(8, Math.round((totalOps / maxProfileTotal) * 100));
                     return `
-                        <div class="legend-item">
-                            <div style="flex:1;min-width:0;">
+                        <div class="ranking-card">
+                            <div class="ranking-index">#${index + 1}</div>
+                            <div class="ranking-body">
                                 <div class="split-line">
                                     <strong>${escapeHtml(profile.name || "未命名")}</strong>
                                     <span class="mini-tag ${profile.is_logged_in ? "success" : "warning"}">${profile.is_logged_in ? "已登录" : "待登录"}</span>
                                 </div>
-                                <div class="progress-line" style="margin:10px 0 8px;">
+                                <div class="progress-line ranking-progress">
                                     <div class="progress-fill" style="width:${percent}%"></div>
                                 </div>
-                                <div class="split-line muted">
-                                    <span>成功 ${profile.sync_count || 0}</span>
-                                    <span>失败 ${profile.error_count || 0}</span>
+                                <div class="split-line muted ranking-meta">
+                                    <span>总计 ${totalOps}</span>
+                                    <span>成功 ${profile.sync_count || 0} · 失败 ${profile.error_count || 0}</span>
                                 </div>
                             </div>
                         </div>`;
