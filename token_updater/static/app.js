@@ -1201,7 +1201,7 @@ async function waitVncReady(timeoutMs = 10000) {
 }
 
 function openVnc() {
-    const url = `${location.protocol}//${location.hostname}:6080/vnc.html`;
+    const url = `https://vnc.chre3.com/vnc.html`;
     window.open(url, "_blank", "noopener");
 }
 
