@@ -273,7 +273,7 @@ class BrowserManager:
                 context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,
-                    viewport={"width": 1024, "height": 768},
+                    viewport={"width": 1600, "height": 900},
                     locale="en-US",
                     timezone_id="America/New_York",
                     proxy=proxy,
@@ -339,7 +339,7 @@ class BrowserManager:
                 self._active_context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=False,  # VNC 可见
-                    viewport={"width": 1024, "height": 768},
+                    viewport={"width": 1600, "height": 900},
                     locale="en-US",
                     timezone_id="America/New_York",
                     proxy=proxy,
@@ -417,7 +417,7 @@ class BrowserManager:
                 context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,  # Headless 省资源
-                    viewport={"width": 1024, "height": 768},
+                    viewport={"width": 1600, "height": 900},
                     locale="en-US",
                     timezone_id="America/New_York",
                     proxy=proxy,
@@ -560,7 +560,7 @@ class BrowserManager:
                 context = await self._playwright.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,
-                    viewport={"width": 1024, "height": 768},
+                    viewport={"width": 1600, "height": 900},
                     locale="en-US",
                     timezone_id="America/New_York",
                     proxy=proxy,
