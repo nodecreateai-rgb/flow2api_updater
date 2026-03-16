@@ -15,7 +15,7 @@ services:
     environment:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
       - API_KEY=${API_KEY:-}
-      - FLOW2API_URL=${FLOW2API_URL:-http://host.docker.internal:8000}
+      - FLOW2API_URL=${FLOW2API_URL:-http://app-index-auxiliary-system-g6hsvi:8000}
       - CONNECTION_TOKEN=${CONNECTION_TOKEN:-}
       - REFRESH_INTERVAL=${REFRESH_INTERVAL:-60}
       # 是否启用 VNC 登录入口：启用后仅在点击「登录」时按需启动 VNC/Xvfb/noVNC，关闭浏览器后自动停止

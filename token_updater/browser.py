@@ -28,7 +28,6 @@ BROWSER_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
     "--no-default-browser-check",
-    "--single-process",  # 单进程模式，省内存
     "--max_old_space_size=128",  # 限制 V8 内存
     "--js-flags=--max-old-space-size=128",
 ]
@@ -162,6 +161,37 @@ class BrowserManager:
                 return proxy
         return None
 
+    async def _launch_persistent_context(self, profile: Dict[str, Any], profile_dir: str, *, headless: bool, proxy: Optional[Dict], login_mode: bool = False) -> BrowserContext:
+        """统一的持久化上下文启动器，失败时自动回退一次。"""
+        base_args = LOGIN_BROWSER_ARGS if login_mode else BROWSER_ARGS
+        launch_attempts = [
+            (base_args, "default"),
+            ([arg for arg in base_args if arg != "--disable-dev-shm-usage"], "no-disable-dev-shm-usage"),
+        ]
+
+        last_error: Optional[Exception] = None
+        for args, label in launch_attempts:
+            try:
+                logger.info(f"[{profile['name']}] 启动浏览器上下文 ({label}, headless={headless})")
+                return await self._playwright.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    headless=headless,
+                    viewport={"width": 1600, "height": 900},
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                    proxy=proxy,
+                    args=args,
+                    ignore_default_args=["--enable-automation"],
+                )
+            except Exception as e:
+                last_error = e
+                logger.warning(f"[{profile['name']}] 启动浏览器上下文失败 ({label}): {e}")
+                await asyncio.sleep(0.8)
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("launch_persistent_context failed without error")
+
     def _parse_cookies_payload(self, cookies_json: str) -> List[Dict[str, Any]]:
         data = json.loads(cookies_json)
         if isinstance(data, list):
@@ -270,15 +300,11 @@ class BrowserManager:
                 self._clean_locks(profile_dir)
                 proxy = await self._get_proxy(profile)
 
-                context = await self._playwright.chromium.launch_persistent_context(
-                    user_data_dir=profile_dir,
+                context = await self._launch_persistent_context(
+                    profile,
+                    profile_dir,
                     headless=True,
-                    viewport={"width": 1600, "height": 900},
-                    locale="en-US",
-                    timezone_id="America/New_York",
                     proxy=proxy,
-                    args=BROWSER_ARGS,
-                    ignore_default_args=["--enable-automation"],
                 )
 
                 await context.add_cookies(cookies)
@@ -336,15 +362,12 @@ class BrowserManager:
                 proxy = await self._get_proxy(profile)
 
                 # 非 headless，用于 VNC 登录
-                self._active_context = await self._playwright.chromium.launch_persistent_context(
-                    user_data_dir=profile_dir,
-                    headless=False,  # VNC 可见
-                    viewport={"width": 1600, "height": 900},
-                    locale="en-US",
-                    timezone_id="America/New_York",
+                self._active_context = await self._launch_persistent_context(
+                    profile,
+                    profile_dir,
+                    headless=False,
                     proxy=proxy,
-                    args=LOGIN_BROWSER_ARGS,
-                    ignore_default_args=["--enable-automation"],
+                    login_mode=True,
                 )
                 self._active_profile_id = profile_id
 
@@ -397,9 +420,18 @@ class BrowserManager:
                 logger.warning(f"[{profile['name']}] 无持久化数据，请先登录")
                 return None
 
+            previous_token = None
+            try:
+                previous_token = await self._peek_token_no_lock(profile_id)
+            except Exception:
+                previous_token = None
+
             # 如果当前 profile 浏览器正在运行（VNC 登录中），直接提取
             if self._active_profile_id == profile_id and self._active_context:
-                return await self._extract_from_context(profile, self._active_context)
+                token = await self._extract_from_context(profile, self._active_context)
+                if token and previous_token and token == previous_token:
+                    logger.warning(f"[{profile['name']}] 提取到的 session token 与刷新前一致，疑似仍为旧会话")
+                return token
 
             # 否则用 headless 模式启动
             context = None
@@ -414,18 +446,16 @@ class BrowserManager:
                 logger.info(f"[{profile['name']}] Headless 模式提取 Token...")
 
                 # Headless + 持久化上下文
-                context = await self._playwright.chromium.launch_persistent_context(
-                    user_data_dir=profile_dir,
-                    headless=True,  # Headless 省资源
-                    viewport={"width": 1600, "height": 900},
-                    locale="en-US",
-                    timezone_id="America/New_York",
+                context = await self._launch_persistent_context(
+                    profile,
+                    profile_dir,
+                    headless=True,
                     proxy=proxy,
-                    args=BROWSER_ARGS,  # 完整内存优化参数
-                    ignore_default_args=["--enable-automation"],
                 )
 
                 token = await self._extract_from_context(profile, context)
+                if token and previous_token and token == previous_token:
+                    logger.warning(f"[{profile['name']}] 提取到的 session token 与刷新前一致，疑似仍为旧会话")
                 return token
 
             except Exception as e:
@@ -440,7 +470,7 @@ class BrowserManager:
                     logger.info(f"[{profile['name']}] Headless 浏览器已关闭")
 
     async def _extract_from_context(self, profile: Dict[str, Any], context: BrowserContext) -> Optional[str]:
-        """从上下文提取 Token（通过 signin 页面刷新 session）"""
+        """从上下文提取 Token（通过真正的登录入口刷新 session）"""
         page = None
         try:
             page = await context.new_page()
@@ -462,41 +492,46 @@ class BrowserManager:
             except Exception:
                 pass
 
-            # 访问 signin 页面并点击 Sign in with Google 按钮刷新 session
-            logger.info(f"[{profile['name']}] 访问 {config.labs_url} 刷新 session...")
-            await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=60000)
+            previous_token = await self._get_session_cookie(context)
+            if previous_token:
+                logger.info(f"[{profile['name']}] 刷新前 session token: {self._mask_token(previous_token)}")
+            else:
+                logger.info(f"[{profile['name']}] 刷新前未读取到 session token")
 
-            # 点击 Sign in with Google 按钮（提交 POST 表单）
-            try:
-                submit_btn = page.locator("button[type='submit']")
-                await submit_btn.wait_for(state="visible", timeout=10000)
-                await submit_btn.click()
-                logger.info(f"[{profile['name']}] 已点击 Sign in with Google，等待跳转...")
-            except Exception as e:
-                logger.warning(f"[{profile['name']}] 点击登录按钮失败: {e}，尝试直接检查 cookie")
+            logger.info(f"[{profile['name']}] 访问 {config.login_url} 刷新 session...")
+            await page.goto(config.login_url, wait_until="domcontentloaded", timeout=60000)
 
-            # 等待跳转到 https://labs.google/ 并提取 cookie
             try:
                 await page.wait_for_url("https://labs.google/**", timeout=30000)
                 logger.info(f"[{profile['name']}] 已成功跳转到 labs.google")
             except Exception as e:
                 logger.warning(f"[{profile['name']}] 等待跳转超时: {e}")
+                try:
+                    await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=30000)
+                except Exception as goto_err:
+                    logger.warning(f"[{profile['name']}] 回退访问 {config.labs_url} 失败: {goto_err}")
 
-            # 等待 cookie 更新：优先轮询 session cookie，减少资源占用
-            token = await self._get_session_cookie(context)
-            deadline = asyncio.get_running_loop().time() + 12.0
+            token = previous_token
+            changed = False
+            deadline = asyncio.get_running_loop().time() + 20.0
             while asyncio.get_running_loop().time() < deadline:
-                token = await self._get_session_cookie(context)
-                if token:
-                    break
+                current_token = await self._get_session_cookie(context)
+                if current_token:
+                    token = current_token
+                    if previous_token is None or current_token != previous_token:
+                        changed = True
+                        break
                 await asyncio.sleep(0.5)
 
-            if not token:
+            if not changed:
                 try:
                     await page.wait_for_load_state("networkidle", timeout=8000)
                 except Exception:
                     pass
-                token = await self._get_session_cookie(context)
+                current_token = await self._get_session_cookie(context)
+                if current_token:
+                    token = current_token
+                    changed = previous_token is None or current_token != previous_token
 
             if token:
                 await profile_db.update_profile(
@@ -505,7 +540,10 @@ class BrowserManager:
                     last_token=self._mask_token(token),
                     last_token_time=datetime.now().isoformat(),
                 )
-                logger.info(f"[{profile['name']}] Token 提取成功")
+                if changed:
+                    logger.info(f"[{profile['name']}] Token 提取成功，session 已刷新")
+                else:
+                    logger.warning(f"[{profile['name']}] Token 提取成功，但 session token 未变化")
             else:
                 await profile_db.update_profile(profile["id"], is_logged_in=0)
                 logger.warning(f"[{profile['name']}] 未找到 Token，会话可能已过期")
@@ -536,46 +574,46 @@ class BrowserManager:
             "profile_name": profile["name"]
         }
 
+    async def _peek_token_no_lock(self, profile_id: int) -> Optional[str]:
+        """轻量获取 token（不访问页面，仅读取 cookie）；调用方负责锁。"""
+        profile = await profile_db.get_profile(profile_id)
+        if not profile:
+            return None
+
+        profile_dir = self._get_profile_dir(profile_id)
+        if not os.path.exists(profile_dir):
+            return None
+
+        if self._active_profile_id == profile_id and self._active_context:
+            return await self._get_session_cookie(self._active_context)
+
+        context = None
+        try:
+            if not self._playwright:
+                await self.start()
+
+            self._clean_locks(profile_dir)
+            proxy = await self._get_proxy(profile)
+            context = await self._launch_persistent_context(
+                profile,
+                profile_dir,
+                headless=True,
+                proxy=proxy,
+            )
+            return await self._get_session_cookie(context)
+        except Exception:
+            return None
+        finally:
+            if context:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+
     async def peek_token(self, profile_id: int) -> Optional[str]:
         """轻量获取 token（不访问页面，仅读取 cookie）"""
         async with self._lock:
-            profile = await profile_db.get_profile(profile_id)
-            if not profile:
-                return None
-
-            profile_dir = self._get_profile_dir(profile_id)
-            if not os.path.exists(profile_dir):
-                return None
-
-            if self._active_profile_id == profile_id and self._active_context:
-                return await self._get_session_cookie(self._active_context)
-
-            context = None
-            try:
-                if not self._playwright:
-                    await self.start()
-
-                self._clean_locks(profile_dir)
-                proxy = await self._get_proxy(profile)
-                context = await self._playwright.chromium.launch_persistent_context(
-                    user_data_dir=profile_dir,
-                    headless=True,
-                    viewport={"width": 1600, "height": 900},
-                    locale="en-US",
-                    timezone_id="America/New_York",
-                    proxy=proxy,
-                    args=BROWSER_ARGS,
-                    ignore_default_args=["--enable-automation"],
-                )
-                return await self._get_session_cookie(context)
-            except Exception:
-                return None
-            finally:
-                if context:
-                    try:
-                        await context.close()
-                    except Exception:
-                        pass
+            return await self._peek_token_no_lock(profile_id)
 
     async def delete_profile_data(self, profile_id: int):
         """删除 profile 数据"""

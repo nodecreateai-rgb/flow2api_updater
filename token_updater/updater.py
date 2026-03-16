@@ -353,13 +353,30 @@ class TokenSyncer:
                     },
                 )
 
-                if response.status_code != 200:
-                    return {"success": False, "error": f"HTTP {response.status_code}"}
+                response_text = (response.text or "").strip()
+                response_json = None
+                if response_text:
+                    try:
+                        response_json = response.json()
+                    except Exception:
+                        response_json = None
 
-                data = response.json()
+                if response.status_code != 200:
+                    detail = None
+                    if isinstance(response_json, dict):
+                        detail = response_json.get("detail") or response_json.get("message")
+                    error = f"HTTP {response.status_code}"
+                    if detail:
+                        error = f"{error}: {detail}"
+                    elif response_text:
+                        snippet = response_text[:300]
+                        error = f"{error}: {snippet}"
+                    return {"success": False, "error": error}
+
+                data = response_json if isinstance(response_json, dict) else response.json()
                 message = data.get("message", "")
-                email = None
-                if " for " in message:
+                email = data.get("email")
+                if not email and " for " in message:
                     email = message.split(" for ")[-1]
 
                 return {
@@ -367,6 +384,7 @@ class TokenSyncer:
                     "action": data.get("action"),
                     "message": message,
                     "email": email,
+                    "at_expires": data.get("at_expires"),
                 }
         except Exception as exc:
             return {"success": False, "error": str(exc)}
