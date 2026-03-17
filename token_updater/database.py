@@ -26,6 +26,8 @@ class ProfileDB:
                     is_active INTEGER DEFAULT 1,
                     last_token TEXT,
                     last_token_time TEXT,
+                    last_check_time TEXT,
+                    last_check_result TEXT,
                     last_sync_time TEXT,
                     last_sync_result TEXT,
                     sync_count INTEGER DEFAULT 0,
@@ -51,6 +53,10 @@ class ProfileDB:
                 await db.execute("ALTER TABLE profiles ADD COLUMN flow2api_url TEXT")
             if 'connection_token_override' not in columns:
                 await db.execute("ALTER TABLE profiles ADD COLUMN connection_token_override TEXT")
+            if 'last_check_time' not in columns:
+                await db.execute("ALTER TABLE profiles ADD COLUMN last_check_time TEXT")
+            if 'last_check_result' not in columns:
+                await db.execute("ALTER TABLE profiles ADD COLUMN last_check_result TEXT")
 
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS sync_history (

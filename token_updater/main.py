@@ -20,9 +20,9 @@ async def scheduled_sync():
     """定时同步任务"""
     logger.info("=== 定时同步任务触发 ===")
 
-    profiles = await profile_db.get_logged_in_profiles()
+    profiles = await profile_db.get_active_profiles()
     if not profiles:
-        logger.warning("没有已登录的 Profile，跳过本次同步")
+        logger.warning("没有启用中的 Profile，跳过本次同步")
         return
 
     await token_syncer.sync_all_profiles()

@@ -168,20 +168,20 @@ function showLogin() {
     elements.loginRoot.innerHTML = `
         <div class="login-card">
             <section class="login-hero">
-                <span class="eyebrow">Flow2API Token Updater</span>
-                <h1 class="login-title">Flow2API Token Updater</h1>
-                <p class="login-subtitle">Profile Administration & Token Sync Console</p>
+                <span class="eyebrow">Flow2API 令牌更新器</span>
+                <h1 class="login-title">Flow2API 令牌更新器</h1>
+                <p class="login-subtitle">用于管理账号、同步令牌与目标配置。</p>
             </section>
             <section class="login-panel">
                 <div>
-                    <h2 class="panel-title">Admin Sign In</h2>
-                    <p class="panel-copy">Enter the administrator password to continue.</p>
+                    <h2 class="panel-title">管理员登录</h2>
+                    <p class="panel-copy">输入管理员密码后进入控制台。</p>
                 </div>
                 <div class="field">
-                    <label for="login-password">Administrator Password</label>
-                    <input id="login-password" type="password" placeholder="Enter administrator password" onkeydown="if(event.key==='Enter'){doLogin()}">
+                    <label for="login-password">管理员密码</label>
+                    <input id="login-password" type="password" placeholder="请输入管理员密码" onkeydown="if(event.key==='Enter'){doLogin()}">
                 </div>
-                <button class="btn primary" onclick="doLogin(this)">Sign In</button>
+                <button class="btn primary" onclick="doLogin(this)">登录</button>
             </section>
         </div>
     `;
@@ -344,17 +344,20 @@ async function fetchDashboard() {
 
 function buildFallbackDashboard(status, config, profiles, selectedHours) {
     const recentActivity = [...profiles]
-        .filter((profile) => profile.last_sync_time)
-        .sort((left, right) => new Date(left.last_sync_time) - new Date(right.last_sync_time))
+        .filter((profile) => profile.last_check_time || profile.last_sync_time)
+        .sort((left, right) => new Date(left.last_check_time || left.last_sync_time) - new Date(right.last_check_time || right.last_sync_time))
         .slice(-18)
-        .map((profile) => ({
-            profile_name: profile.name,
-            message: profile.last_sync_result || "暂无同步记录",
-            status: String(profile.last_sync_result || "").startsWith("success") ? "success" : "error",
-            target_url: profile.effective_flow2api_url || config.flow2api_url,
-            target_label: profile.target_label || profile.effective_flow2api_url || config.flow2api_url || "未配置",
-            created_at: profile.last_sync_time,
-        }));
+        .map((profile) => {
+            const lastResult = profile.last_check_result || profile.last_sync_result || "";
+            return {
+                profile_name: profile.name,
+                message: lastResult || "暂无同步记录",
+                status: getResultStatus(lastResult),
+                target_url: profile.effective_flow2api_url || config.flow2api_url,
+                target_label: profile.target_label || profile.effective_flow2api_url || config.flow2api_url || "未配置",
+                created_at: profile.last_check_time || profile.last_sync_time,
+            };
+        });
 
     const summary = {
         total: profiles.length,
@@ -364,7 +367,7 @@ function buildFallbackDashboard(status, config, profiles, selectedHours) {
         token_overrides: profiles.filter((profile) => profile.has_connection_token_override).length,
         proxy_enabled: profiles.filter((profile) => profile.proxy_url).length,
         window_success: recentActivity.filter((item) => item.status === "success").length,
-        window_error: recentActivity.filter((item) => item.status !== "success").length,
+        window_error: recentActivity.filter((item) => item.status === "error").length,
     };
 
     return {
@@ -431,9 +434,10 @@ function buildSyntheticActivity(profiles, hours) {
         if (!bucket) {
             return;
         }
-        if (String(profile.last_sync_result || "").startsWith("success")) {
+        const resultStatus = getResultStatus(profile.last_check_result || profile.last_sync_result || "");
+        if (resultStatus === "success") {
             bucket.success += 1;
-        } else {
+        } else if (resultStatus === "error") {
             bucket.error += 1;
         }
     });
@@ -444,7 +448,7 @@ function buildSyntheticActivity(profiles, hours) {
 function buildFallbackFailureReasons(events) {
     const counts = new Map();
     events.forEach((event) => {
-        if (event.status === "success") {
+        if (event.status !== "error") {
             return;
         }
         const label = String(event.message || "未知错误").slice(0, 28);
@@ -488,12 +492,52 @@ function buildFallbackTargetDistribution(profiles, recentActivity) {
         };
         if (event.status === "success") {
             entry.success += 1;
-        } else {
+        } else if (event.status === "error") {
             entry.error += 1;
         }
         grouped.set(targetLabel, entry);
     });
     return [...grouped.values()].sort((left, right) => (right.profile_count + right.success + right.error) - (left.profile_count + left.success + left.error));
+}
+
+function getResultStatus(resultText) {
+    const text = String(resultText || "").toLowerCase();
+    if (text.startsWith("success")) {
+        return "success";
+    }
+    if (text.startsWith("skipped")) {
+        return "skipped";
+    }
+    if (text) {
+        return "error";
+    }
+    return "info";
+}
+
+function getStatusTone(status) {
+    if (status === "success") {
+        return "success";
+    }
+    if (status === "skipped") {
+        return "warning";
+    }
+    if (status === "error") {
+        return "danger";
+    }
+    return "info";
+}
+
+function getStatusLabel(status) {
+    if (status === "success") {
+        return "成功";
+    }
+    if (status === "skipped") {
+        return "跳过";
+    }
+    if (status === "error") {
+        return "失败";
+    }
+    return "状态";
 }
 
 function renderApp() {
@@ -514,13 +558,13 @@ function renderApp() {
     elements.appRoot.innerHTML = `
         <header class="topbar">
             <div>
-                <span class="eyebrow">Dashboard · v${escapeHtml(dashboard.version || "-")}</span>
-                <h1 class="hero-title">Flow2API Token Updater</h1>
-                <p class="hero-subtitle">Profile administration, sync status and target configuration.</p>
+                <span class="eyebrow">控制台 · v${escapeHtml(dashboard.version || "-")}</span>
+                <h1 class="hero-title">Flow2API 令牌更新器</h1>
+                <p class="hero-subtitle">账号管理、同步状态与目标配置。</p>
             </div>
             <div class="toolbar">
                 <span id="stream-status-pill" class="tag ${streamMeta.tone}">${escapeHtml(streamMeta.label)}</span>
-                ${vncEnabled ? `<button class="btn ghost" onclick="openVnc()" ${vncRunning ? "" : "disabled"}>${vncRunning ? "打开 VNC" : "VNC 未启动"}</button>` : ""}
+                ${vncEnabled ? `<button class="btn ghost" onclick="openVnc()" ${vncRunning ? "" : "disabled"}>${vncRunning ? "打开远程登录" : "远程登录未启动"}</button>` : ""}
                 <button class="btn ghost" onclick="refreshDashboardAction(this)">刷新</button>
                 <button class="btn danger" onclick="doLogout(this)">退出</button>
             </div>
@@ -528,17 +572,17 @@ function renderApp() {
 
         <div class="notice">
             ${vncEnabled
-                ? `登录方式：创建 Profile → 点击「登录」→ 在 VNC 完成 Google 登录 → 点击「关闭浏览器」保存状态。当前 ${vncRunning ? "VNC 已可用" : "VNC 暂未启动，会在点击登录后按需拉起"}。`
-                : "当前已禁用 VNC。如需重新授权，请把 ENABLE_VNC=1 写入环境变量并重启容器。"}
+                ? `登录方式：创建账号 → 点击「登录」→ 在远程登录窗口完成谷歌登录 → 点击「关闭浏览器」保存状态。当前 ${vncRunning ? "远程登录已可用" : "远程登录暂未启动，会在点击登录后按需拉起"}。`
+                : "当前已禁用远程登录。如需重新授权，请将环境变量 ENABLE_VNC 设为 1 后重启容器。"}
             <div id="stream-status-copy" class="notice-inline">${escapeHtml(streamMeta.copy)}</div>
         </div>
 
         <section class="stats-grid">
-            ${renderMetricCard("Profile 总数", summary.total || 0, `${summary.active || 0} 个启用中`)}
+            ${renderMetricCard("账号总数", summary.total || 0, `${summary.active || 0} 个启用中`)}
             ${renderMetricCard("已登录", summary.logged_in || 0, `未登录 ${(summary.total || 0) - (summary.logged_in || 0)} 个`, "success")}
-            ${renderMetricCard("自定义目标", summary.custom_targets || 0, `Token 覆盖 ${summary.token_overrides || 0} 个`, "info")}
-            ${renderMetricCard("窗口成功", summary.window_success || 0, `最近 ${selectedHours}h`, "success")}
-            ${renderMetricCard("窗口失败", summary.window_error || 0, `最近 ${selectedHours}h`, "danger")}
+            ${renderMetricCard("自定义目标", summary.custom_targets || 0, `令牌覆盖 ${summary.token_overrides || 0} 个`, "info")}
+            ${renderMetricCard("窗口成功", summary.window_success || 0, `最近 ${selectedHours} 小时`, "success")}
+            ${renderMetricCard("窗口失败", summary.window_error || 0, `最近 ${selectedHours} 小时`, "danger")}
             ${renderMetricCard("目标实例", targetDistribution.length || summary.target_count || summary.target_instances || 0, `代理启用 ${summary.proxy_enabled || 0} 个`, "primary")}
         </section>
 
@@ -555,9 +599,9 @@ function renderApp() {
                     <input id="config-url" value="${escapeAttr(config.flow2api_url || "")}" placeholder="http://host.docker.internal:8000">
                 </div>
                 <div class="field">
-                    <label for="config-token">默认连接 Token</label>
+                    <label for="config-token">默认连接令牌</label>
                     <input id="config-token" type="password" placeholder="${escapeAttr(config.connection_token_preview || "未设置")}">
-                    <span class="field-hint">留空表示保持当前默认 Token 不变。</span>
+                    <span class="field-hint">留空表示保持当前默认令牌不变。</span>
                 </div>
                 <div class="field">
                     <label for="config-interval">刷新间隔（分钟）</label>
@@ -567,19 +611,19 @@ function renderApp() {
         </section>
 
         <section class="section-card">
-            <div class="card-head">
-                <div>
-                    <h2 class="card-title">Profile 列表</h2>
+                <div class="card-head">
+                    <div>
+                    <h2 class="card-title">账号列表</h2>
                 </div>
                 <div class="button-row">
                     <button class="btn success" onclick="syncAll(this)">同步全部</button>
-                    <button class="btn primary" onclick="openProfileModal()">新建 Profile</button>
+                    <button class="btn primary" onclick="openProfileModal()">新建账号</button>
                 </div>
             </div>
             <div class="profiles-grid">
                 ${profiles.length ? profiles.map(renderProfileCard).join("") : `
                     <div class="empty-state">
-                        还没有 Profile。先创建一个账号，再通过 VNC 登录或导入 Cookie。
+                        还没有账号。先创建一个账号，再通过远程登录或导入会话数据完成登录。
                     </div>`}
             </div>
         </section>
@@ -600,7 +644,7 @@ function renderHourFilterButtons(options, selectedHours) {
     return `
         <div class="button-row wrap-row">
             ${options.map((hours) => `
-                <button class="btn ${hours === selectedHours ? "primary" : "ghost"} small" onclick="setChartRange(${hours}, this)">${hours >= 168 ? "7d" : `${hours}h`}</button>
+                <button class="btn ${hours === selectedHours ? "primary" : "ghost"} small" onclick="setChartRange(${hours}, this)">${hours >= 168 ? "7天" : `${hours}小时`}</button>
             `).join("")}
         </div>
     `;
@@ -627,7 +671,7 @@ function renderActivityChart(chart, selectedHours) {
             <div class="button-row wrap-row compact-row">
                 <span class="tag success">成功</span>
                 <span class="tag danger">失败</span>
-                <span class="tag info">粒度 ${bucketHours}h</span>
+                <span class="tag info">粒度 ${bucketHours} 小时</span>
             </div>
             <div class="activity-bars" style="grid-template-columns: repeat(${Math.max(1, data.length)}, minmax(0, 1fr));">
                 ${data.map((point, index) => {
@@ -660,10 +704,10 @@ function renderStatusAndRanking(breakdown, topProfiles) {
     const maxProfileTotal = Math.max(1, ...topProfiles.map((profile) => (profile.sync_count || 0) + (profile.error_count || 0)));
 
     const statusItems = [
-        { label: "???", value: loggedIn, tone: "success" },
-        { label: "???", value: notLoggedIn, tone: "warning" },
-        { label: "??", value: active, tone: "primary" },
-        { label: "??", value: inactive, tone: "danger" },
+        { label: "已登录", value: loggedIn, tone: "success" },
+        { label: "未登录", value: notLoggedIn, tone: "warning" },
+        { label: "启用中", value: active, tone: "primary" },
+        { label: "已停用", value: inactive, tone: "danger" },
     ];
 
     return `
@@ -674,7 +718,7 @@ function renderStatusAndRanking(breakdown, topProfiles) {
                         <div class="donut compact-donut" style="${donutStyle}"></div>
                         <div class="donut-center">
                             <div class="donut-value">${ratio}%</div>
-                            <div class="muted">?????</div>
+                            <div class="muted">登录率</div>
                         </div>
                     </div>
                 </div>
@@ -765,7 +809,7 @@ function renderTargetDistribution(items) {
                     <div class="data-row">
                         <div class="split-line">
                             <strong>${escapeHtml(item.target_label || item.label || item.target_url || "未配置")}</strong>
-                            <span class="mini-tag primary">${escapeHtml(String(totalProfiles))} 个 Profile</span>
+                            <span class="mini-tag primary">${escapeHtml(String(totalProfiles))} 个账号</span>
                         </div>
                         <div class="progress-line subtle-progress">
                             <div class="progress-fill" style="width:${width}%"></div>
@@ -782,9 +826,11 @@ function renderTargetDistribution(items) {
 }
 
 function renderProfileCard(profile) {
-    const lastResult = String(profile.last_sync_result || "");
-    const resultTone = lastResult.startsWith("success") ? "success" : lastResult ? "danger" : "info";
+    const lastResult = String(profile.last_check_result || profile.last_sync_result || "");
+    const resultStatus = getResultStatus(lastResult);
+    const resultTone = getStatusTone(resultStatus);
     const targetLabel = profile.uses_default_target ? "默认目标" : "独立目标";
+    const lastProcessedAt = profile.last_check_time || profile.last_sync_time;
 
     return `
         <article class="profile-card">
@@ -803,9 +849,9 @@ function renderProfileCard(profile) {
 
             <div class="chip-row">
                 <span class="badge ${profile.is_logged_in ? "success" : "warning"}">${profile.is_logged_in ? "已登录" : "未登录"}</span>
-                <span class="badge ${resultTone}">${escapeHtml(lastResult || "暂无同步结果")}</span>
+                <span class="badge ${resultTone}">${escapeHtml(lastResult || "暂无处理结果")}</span>
                 <span class="badge info">${escapeHtml(targetLabel)}</span>
-                ${profile.has_connection_token_override ? `<span class="badge primary">Token 已覆盖</span>` : ""}
+                ${profile.has_connection_token_override ? `<span class="badge primary">已覆盖令牌</span>` : ""}
                 ${profile.proxy_url ? `<span class="badge primary">代理已配置</span>` : ""}
             </div>
 
@@ -815,8 +861,8 @@ function renderProfileCard(profile) {
                     <span>${escapeHtml(profile.effective_flow2api_url || "未配置")}</span>
                 </div>
                 <div class="detail-item">
-                    <span>最近同步</span>
-                    <span>${escapeHtml(formatDate(profile.last_sync_time))}</span>
+                    <span>最近处理</span>
+                    <span>${escapeHtml(formatDate(lastProcessedAt))}</span>
                 </div>
                 <div class="detail-item">
                     <span>累计统计</span>
@@ -837,7 +883,7 @@ function renderProfileCard(profile) {
                         : ""}
                     <button class="btn ghost small" onclick="checkLogin(${profile.id}, this)">检测</button>
                     <button class="btn success small" onclick="syncProfile(${profile.id}, this)">同步</button>
-                    <button class="btn ghost small" onclick="openCookieModal(${profile.id})">Cookie</button>
+                    <button class="btn ghost small" onclick="openCookieModal(${profile.id})">会话数据</button>
                 </div>
                 <div class="button-row">
                     <button class="btn ghost small" onclick="openProfileModal(${profile.id})">编辑</button>
@@ -860,7 +906,7 @@ function renderRecentActivity(events) {
                     <div>
                         <div class="split-line" style="justify-content:flex-start;gap:10px;">
                             <strong>${escapeHtml(event.profile_name || "系统")}</strong>
-                            <span class="mini-tag ${event.status === "success" ? "success" : "danger"}">${event.status === "success" ? "成功" : "失败"}</span>
+                            <span class="mini-tag ${getStatusTone(event.status)}">${escapeHtml(getStatusLabel(event.status))}</span>
                             ${event.reason_category ? `<span class="mini-tag info">${escapeHtml(event.reason_category)}</span>` : ""}
                         </div>
                         <div class="profile-meta">${escapeHtml(event.message || event.action || "暂无说明")}</div>
@@ -975,7 +1021,7 @@ async function loadProfileModal(profileId) {
         const profile = await json(`${API}/api/profiles/${profileId}`);
         renderProfileModal(profile, true);
     } catch (error) {
-        toast(error.message || "读取 Profile 失败", "error");
+        toast(error.message || "读取账号失败", "error");
     }
 }
 
@@ -986,14 +1032,14 @@ function renderProfileModal(profile, editing) {
         <div class="modal-card">
             <div class="modal-head">
                 <div>
-                    <span class="eyebrow">${editing ? "编辑 Profile" : "新建 Profile"}</span>
+                    <span class="eyebrow">${editing ? "编辑账号" : "新建账号"}</span>
                     <h3 class="card-title">${editing ? "调整账号配置" : "添加新账号"}</h3>
                 </div>
                 <button class="btn ghost small" onclick="closeModal()">关闭</button>
             </div>
             <div class="form-grid">
                 <div class="field">
-                    <label for="profile-name">名称</label>
+                    <label for="profile-name">账号名称</label>
                     <input id="profile-name" value="${escapeAttr(profile.name || "")}" placeholder="例如：主账号-A">
                 </div>
                 <div class="field">
@@ -1004,7 +1050,7 @@ function renderProfileModal(profile, editing) {
                     <label>启用状态</label>
                     <label class="switch">
                         <input id="profile-active" type="checkbox" ${profile.is_active === false ? "" : "checked"}>
-                        <span>该 Profile 参与自动同步</span>
+                        <span>该账号参与自动同步</span>
                     </label>
                 </div>
                 <div class="field">
@@ -1018,8 +1064,8 @@ function renderProfileModal(profile, editing) {
                     <span class="field-hint">适合把某个账号单独推到另一套 Flow2API。</span>
                 </div>
                 <div class="field">
-                    <label for="profile-target-token">连接 Token 覆盖</label>
-                    <input id="profile-target-token" type="password" placeholder="${escapeAttr(profile.connection_token_override_preview || "留空则使用全局默认 Token")}">
+                    <label for="profile-target-token">连接令牌覆盖</label>
+                    <input id="profile-target-token" type="password" placeholder="${escapeAttr(profile.connection_token_override_preview || "留空则使用全局默认令牌")}">
                     <span class="field-hint">输入新值会覆盖；留空默认不修改当前值。</span>
                 </div>
             </div>
@@ -1027,12 +1073,12 @@ function renderProfileModal(profile, editing) {
                 <div class="field" style="margin-top:16px;">
                     <label class="switch">
                         <input id="profile-clear-token-override" type="checkbox">
-                        <span>清空当前连接 Token 覆盖，改回走全局默认值</span>
+                        <span>清空当前连接令牌覆盖，改回使用全局默认值</span>
                     </label>
                 </div>` : ""}
             <div class="modal-actions">
                 <button class="btn ghost" onclick="closeModal()">取消</button>
-                <button class="btn primary" onclick="saveProfile(this)">${editing ? "保存变更" : "创建 Profile"}</button>
+                <button class="btn primary" onclick="saveProfile(this)">${editing ? "保存变更" : "创建账号"}</button>
             </div>
         </div>
     `);
@@ -1049,7 +1095,7 @@ async function saveProfile(button) {
     const isActive = Boolean(document.getElementById("profile-active")?.checked);
 
     if (!name) {
-        toast("请输入 Profile 名称", "error");
+        toast("请输入账号名称", "error");
         return;
     }
 
@@ -1083,7 +1129,7 @@ async function saveProfile(button) {
         }
         closeModal();
         await refreshDashboard(false, true);
-        toast(modal.editing ? "Profile 已保存" : "Profile 已创建", "success");
+        toast(modal.editing ? "账号已保存" : "账号已创建", "success");
     });
 }
 
@@ -1093,19 +1139,19 @@ function openCookieModal(profileId) {
         <div class="modal-card">
             <div class="modal-head">
                 <div>
-                    <span class="eyebrow">导入 Cookie</span>
+                    <span class="eyebrow">导入会话数据</span>
                     <h3 class="card-title">快速恢复登录态</h3>
                 </div>
                 <button class="btn ghost small" onclick="closeModal()">关闭</button>
             </div>
             <div class="field">
-                <label for="cookie-json">Cookie JSON</label>
+                <label for="cookie-json">会话数据文本</label>
                 <textarea id="cookie-json" placeholder='[{"name":"...","value":"...","domain":".labs.google","path":"/","secure":true}]'></textarea>
-                <span class="field-hint">导入成功后，系统会把 Cookie 写入该 Profile 的持久化浏览器数据。</span>
+                <span class="field-hint">导入成功后，系统会把会话数据写入该账号的持久化浏览器资料。</span>
             </div>
             <div class="modal-actions">
                 <button class="btn ghost" onclick="closeModal()">取消</button>
-                <button class="btn primary" onclick="submitCookies(this)">导入 Cookie</button>
+                <button class="btn primary" onclick="submitCookies(this)">导入会话数据</button>
             </div>
         </div>
     `);
@@ -1115,7 +1161,7 @@ async function submitCookies(button) {
     const modal = state.modal || {};
     const cookiesJson = (document.getElementById("cookie-json")?.value || "").trim();
     if (!cookiesJson) {
-        toast("请输入 Cookie JSON", "error");
+        toast("请输入会话数据文本", "error");
         return;
     }
 
@@ -1127,7 +1173,7 @@ async function submitCookies(button) {
         });
         closeModal(true);
         await refreshDashboard(false, true);
-        toast(data.has_token ? "导入成功，已检测到 Token" : "已导入，但尚未检测到 Token", data.has_token ? "success" : "error");
+        toast(data.has_token ? "导入成功，已检测到会话令牌" : "已导入，但暂未检测到会话令牌", data.has_token ? "success" : "error");
     });
 }
 
@@ -1161,7 +1207,7 @@ async function launchBrowser(profileId, button) {
         await waitVncReady();
         await refreshDashboard(false, true);
         openVnc();
-        toast("浏览器已启动，请在 VNC 完成登录", "success");
+        toast("浏览器已启动，请在远程登录窗口完成登录", "success");
     });
 }
 
@@ -1181,7 +1227,7 @@ async function deleteProfile(profileId, profileName, button) {
     await withButton(button, "删除中...", async () => {
         await request(`${API}/api/profiles/${profileId}`, {method: "DELETE"});
         await refreshDashboard(false, true);
-        toast("Profile 已删除", "success");
+        toast("账号已删除", "success");
     });
 }
 async function waitVncReady(timeoutMs = 10000) {
@@ -1300,7 +1346,7 @@ async function safeJson(response) {
 
 async function parseError(response) {
     const data = await safeJson(response);
-    return data.detail || data.error || data.message || `请求失败（HTTP ${response.status}）`;
+    return data.detail || data.error || data.message || `请求失败（状态码 ${response.status}）`;
 }
 
 function handleExpiredSession() {

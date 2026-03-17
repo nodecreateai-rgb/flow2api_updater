@@ -174,6 +174,14 @@ def _bucket_hours_for_range(hours: int) -> int:
     return 6
 
 
+def _is_success_event(event: Dict[str, Any]) -> bool:
+    return event.get("status") == "success"
+
+
+def _is_error_event(event: Dict[str, Any]) -> bool:
+    return event.get("status") == "error"
+
+
 def _build_activity_chart(events: List[Dict[str, Any]], hours: int = 24) -> Dict[str, Any]:
     bucket_hours = _bucket_hours_for_range(hours)
     now = datetime.now().replace(minute=0, second=0, microsecond=0)
@@ -212,9 +220,9 @@ def _build_activity_chart(events: List[Dict[str, Any]], hours: int = 24) -> Dict
         bucket = bucket_map.get(event_time.isoformat())
         if not bucket:
             continue
-        if event.get("status") == "success":
+        if _is_success_event(event):
             bucket["success"] += 1
-        else:
+        elif _is_error_event(event):
             bucket["error"] += 1
 
     return {
@@ -226,7 +234,7 @@ def _build_activity_chart(events: List[Dict[str, Any]], hours: int = 24) -> Dict
 def _build_failure_breakdown(events: List[Dict[str, Any]], limit: int = 6) -> List[Dict[str, Any]]:
     counts: Dict[str, Dict[str, Any]] = {}
     for event in events:
-        if event.get("status") == "success":
+        if not _is_error_event(event):
             continue
         label = _classify_failure_reason(event.get("message") or event.get("action") or "")
         entry = counts.setdefault(
@@ -282,9 +290,9 @@ def _build_target_distribution(
                 "last_event_at": None,
             },
         )
-        if event.get("status") == "success":
+        if _is_success_event(event):
             entry["success"] += 1
-        else:
+        elif _is_error_event(event):
             entry["error"] += 1
         if event.get("created_at") and (entry["last_event_at"] is None or event["created_at"] > entry["last_event_at"]):
             entry["last_event_at"] = event["created_at"]
@@ -350,8 +358,8 @@ async def _build_dashboard_payload(hours: int = 24) -> Dict[str, Any]:
         reverse=True,
     )[:6]
 
-    window_success = sum(1 for event in activity_events if event.get("status") == "success")
-    window_error = sum(1 for event in activity_events if event.get("status") != "success")
+    window_success = sum(1 for event in activity_events if _is_success_event(event))
+    window_error = sum(1 for event in activity_events if _is_error_event(event))
 
     return {
         "browser": browser_manager.get_status(),
