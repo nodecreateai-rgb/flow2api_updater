@@ -15,6 +15,11 @@ from .logger import logger
 class TokenSyncer:
     """Token 同步器。"""
 
+    def _is_expired_access_token_error(self, error: str) -> bool:
+        text = (error or "").lower()
+        return "expired access token" in text or "converted to an expired access token" in text
+
+
     def __init__(self):
         self._total_sync_count = 0
         self._total_error_count = 0
@@ -89,6 +94,14 @@ class TokenSyncer:
                     },
                 )
 
+                if response.status_code in (404, 405):
+                    return {
+                        "success": True,
+                        "tokens": [],
+                        "needs_refresh_emails": [],
+                        "mode": "unsupported",
+                        "message": "check-tokens endpoint unavailable on target Flow2API",
+                    }
                 if response.status_code != 200:
                     return {"success": False, "error": f"HTTP {response.status_code}"}
 
@@ -143,6 +156,21 @@ class TokenSyncer:
 
         logger.info(f"[{profile['name']}] 提取到 Token: {token[:20]}...{token[-10:]}")
         result = await self._push_to_flow2api(token, flow2api_url, connection_token)
+
+        if (not result.get("success")) and self._is_expired_access_token_error(result.get("error", "")):
+            logger.warning(f"[{profile['name']}] Flow2API 返回 expired access token，自动执行一次 headed 会话激活后重试")
+            activation = await browser_manager.activate_session(profile_id)
+            if activation.get("success"):
+                retry_token = activation.get("token") or await browser_manager.extract_token(profile_id)
+                if retry_token:
+                    result = await self._push_to_flow2api(retry_token, flow2api_url, connection_token)
+                    if result.get("success"):
+                        msg = result.get("message", "")
+                        result["message"] = f"[auto-reactivated] {msg}".strip()
+                else:
+                    result = {"success": False, "error": "自动会话激活后仍无法提取 token"}
+            else:
+                result = {"success": False, "error": f"自动会话激活失败: {activation.get('error', 'unknown')}"}
 
         if result["success"]:
             await profile_db.update_profile(

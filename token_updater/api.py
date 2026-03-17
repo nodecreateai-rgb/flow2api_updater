@@ -1,6 +1,7 @@
 """Token Updater API v3.3"""
 import secrets
 import time
+import httpx
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -336,6 +337,103 @@ def _public_config() -> Dict[str, Any]:
     }
 
 
+async def _validate_flow2api_connection(flow2api_url: str, connection_token: str) -> Dict[str, Any]:
+    if not flow2api_url:
+        raise HTTPException(400, "Flow2API 地址不能为空")
+    if not connection_token:
+        raise HTTPException(400, "未配置 CONNECTION_TOKEN")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {connection_token}",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            check_response = await client.post(
+                f"{flow2api_url}/api/plugin/check-tokens",
+                json={},
+                headers=headers,
+            )
+
+            if check_response.status_code == 200:
+                data = check_response.json()
+                if not isinstance(data, dict):
+                    raise HTTPException(400, "Flow2API 连通性校验失败: 返回格式无效")
+                return {"success": True, "mode": "check-tokens", **data}
+
+            if check_response.status_code not in (404, 405):
+                response_text = (check_response.text or "").strip()
+                response_json = None
+                if response_text:
+                    try:
+                        response_json = check_response.json()
+                    except Exception:
+                        response_json = None
+                detail = None
+                if isinstance(response_json, dict):
+                    detail = response_json.get("detail") or response_json.get("message")
+                error = f"HTTP {check_response.status_code}"
+                if detail:
+                    error = f"{error}: {detail}"
+                elif response_text:
+                    error = f"{error}: {response_text[:300]}"
+                raise HTTPException(400, f"Flow2API 连通性校验失败: {error}")
+
+            update_response = await client.post(
+                f"{flow2api_url}/api/plugin/update-token",
+                json={},
+                headers=headers,
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(400, f"Flow2API 连通性校验失败: {exc}") from exc
+
+    response_text = (update_response.text or "").strip()
+    response_json = None
+    if response_text:
+        try:
+            response_json = update_response.json()
+        except Exception:
+            response_json = None
+
+    detail = None
+    if isinstance(response_json, dict):
+        detail = response_json.get("detail") or response_json.get("message")
+
+    if update_response.status_code == 400 and detail == "Missing session_token":
+        return {"success": True, "mode": "update-token-fallback", "message": detail}
+    if update_response.status_code == 401:
+        raise HTTPException(400, "Flow2API 连通性校验失败: HTTP 401: Invalid connection token")
+    if update_response.status_code == 404:
+        raise HTTPException(400, "Flow2API 连通性校验失败: HTTP 404: 缺少 /api/plugin/update-token")
+    if update_response.status_code != 200:
+        error = f"HTTP {update_response.status_code}"
+        if detail:
+            error = f"{error}: {detail}"
+        elif response_text:
+            error = f"{error}: {response_text[:300]}"
+        raise HTTPException(400, f"Flow2API 连通性校验失败: {error}")
+
+    return {"success": True, "mode": "update-token"}
+
+
+async def _apply_global_target_to_profiles() -> int:
+    profiles = await profile_db.get_all_profiles()
+    changed = 0
+    for profile in profiles:
+        updates: Dict[str, Any] = {}
+        if (profile.get("flow2api_url") or "").strip():
+            updates["flow2api_url"] = ""
+        if (profile.get("connection_token_override") or "").strip():
+            updates["connection_token_override"] = ""
+        if updates:
+            await profile_db.update_profile(profile["id"], **updates)
+            changed += 1
+    return changed
+
+
 async def _build_dashboard_payload(hours: int = 24) -> Dict[str, Any]:
     selected_hours = _normalize_dashboard_hours(hours)
     raw_profiles = await profile_db.get_all_profiles()
@@ -428,6 +526,8 @@ class UpdateConfigRequest(BaseModel):
     flow2api_url: Optional[str] = None
     connection_token: Optional[str] = None
     refresh_interval: Optional[int] = None
+    apply_to_all_profiles: bool = True
+    validate_connection: bool = True
 
 
 class ImportCookiesRequest(BaseModel):
@@ -684,15 +784,31 @@ async def get_config(token: str = Depends(verify_session)):
 async def update_config(request: UpdateConfigRequest, api_request: Request, token: str = Depends(verify_session)):
     old_interval = config.refresh_interval
 
+    next_flow2api_url = config.flow2api_url
+    next_connection_token = config.connection_token
+
     if request.flow2api_url is not None:
-        config.flow2api_url = _validate_flow2api_url(request.flow2api_url, required=True)
+        next_flow2api_url = _validate_flow2api_url(request.flow2api_url, required=True)
     if request.connection_token is not None:
-        config.connection_token = _validate_connection_token(request.connection_token)
+        next_connection_token = _validate_connection_token(request.connection_token)
     if request.refresh_interval is not None:
         if request.refresh_interval < 1 or request.refresh_interval > 1440:
             raise HTTPException(400, "刷新间隔需在 1-1440 分钟之间")
+
+    if request.validate_connection:
+        await _validate_flow2api_connection(next_flow2api_url, next_connection_token)
+
+    config.flow2api_url = next_flow2api_url
+    config.connection_token = next_connection_token
+    if request.refresh_interval is not None:
         config.refresh_interval = request.refresh_interval
     config.save()
+
+    applied_profiles = 0
+    if request.apply_to_all_profiles:
+        applied_profiles = await _apply_global_target_to_profiles()
+        if applied_profiles:
+            await dashboard_events.publish("profile_updated", {"scope": "all_targets_reset", "count": applied_profiles})
 
     if request.refresh_interval is not None and config.refresh_interval != old_interval:
         scheduler = getattr(api_request.app.state, "scheduler", None)
@@ -706,8 +822,15 @@ async def update_config(request: UpdateConfigRequest, api_request: Request, toke
             except Exception as exc:
                 logger.warning(f"更新定时任务失败: {exc}")
 
-    await dashboard_events.publish("config_updated", {"refresh_interval": config.refresh_interval})
-    return {"success": True}
+    await dashboard_events.publish(
+        "config_updated",
+        {
+            "refresh_interval": config.refresh_interval,
+            "flow2api_url": config.flow2api_url,
+            "applied_to_profiles": applied_profiles,
+        },
+    )
+    return {"success": True, "validated": bool(request.validate_connection), "applied_to_profiles": applied_profiles}
 
 
 @app.get("/v1/profiles")

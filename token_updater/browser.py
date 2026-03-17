@@ -381,6 +381,92 @@ class BrowserManager:
                 logger.error(f"[{profile['name']}] 启动失败: {e}")
                 return False
 
+    async def activate_session(self, profile_id: int, wait_seconds: float = 8.0) -> Dict[str, Any]:
+        """自动做一次 headed 会话激活，等价于“点登录 -> 浏览器起来 -> 直接关闭”。"""
+        if not config.enable_vnc:
+            return {"success": False, "error": "VNC 未启用，无法执行 headed 会话激活"}
+
+        async with self._lock:
+            await self._close_active()
+            profile = await profile_db.get_profile(profile_id)
+            if not profile:
+                return {"success": False, "error": "Profile 不存在"}
+
+            context = None
+            try:
+                if not self._playwright:
+                    await self.start()
+                ok = await self._ensure_vnc_stack()
+                if not ok:
+                    return {"success": False, "error": "VNC 服务启动失败"}
+
+                profile_dir = self._get_profile_dir(profile_id)
+                os.makedirs(profile_dir, exist_ok=True)
+                self._clean_locks(profile_dir)
+                proxy = await self._get_proxy(profile)
+
+                previous_token = None
+                try:
+                    previous_token = await self._peek_token_no_lock(profile_id)
+                except Exception:
+                    previous_token = None
+
+                context = await self._launch_persistent_context(
+                    profile,
+                    profile_dir,
+                    headless=False,
+                    proxy=proxy,
+                    login_mode=True,
+                )
+                page = context.pages[0] if context.pages else await context.new_page()
+                try:
+                    await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=60000)
+                except Exception:
+                    try:
+                        await page.goto(config.login_url, wait_until="domcontentloaded", timeout=60000)
+                    except Exception:
+                        pass
+
+                deadline = asyncio.get_running_loop().time() + max(wait_seconds, 3.0)
+                token = previous_token
+                changed = False
+                while asyncio.get_running_loop().time() < deadline:
+                    current_token = await self._get_session_cookie(context)
+                    if current_token:
+                        token = current_token
+                        if previous_token is None or current_token != previous_token:
+                            changed = True
+                            break
+                    await asyncio.sleep(0.5)
+
+                if token:
+                    await profile_db.update_profile(
+                        profile_id,
+                        is_logged_in=1,
+                        last_token=self._mask_token(token),
+                        last_token_time=datetime.now().isoformat(),
+                    )
+                else:
+                    await profile_db.update_profile(profile_id, is_logged_in=0)
+
+                return {
+                    "success": bool(token),
+                    "token": token,
+                    "changed": changed,
+                    "had_previous": bool(previous_token),
+                    "error": None if token else "未读取到 session token",
+                }
+            except Exception as e:
+                logger.error(f"[{profile['name']}] headed 会话激活失败: {e}")
+                return {"success": False, "error": str(e)}
+            finally:
+                if context:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                await self._stop_vnc_stack()
+
     async def close_browser(self, profile_id: int) -> Dict[str, Any]:
         """关闭浏览器并保存状态"""
         async with self._lock:

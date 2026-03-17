@@ -71,9 +71,9 @@ def _build_config() -> Config:
     config_file = _get_env("CONFIG_FILE") or "/app/data/config.json"
     persisted = _load_persisted(config_file)
 
-    flow2api_url = _get_env("FLOW2API_URL") or persisted.get("flow2api_url") or "http://app-index-auxiliary-system-g6hsvi:8000"
-    connection_token = _get_env("CONNECTION_TOKEN") or persisted.get("connection_token", "")
-    refresh_interval = _parse_int(_get_env("REFRESH_INTERVAL") or str(persisted.get("refresh_interval", 60)), 60)
+    flow2api_url = persisted.get("flow2api_url") or _get_env("FLOW2API_URL") or "http://app-index-auxiliary-system-g6hsvi:8000"
+    connection_token = persisted.get("connection_token") or _get_env("CONNECTION_TOKEN") or ""
+    refresh_interval = _parse_int(str(persisted.get("refresh_interval", _get_env("REFRESH_INTERVAL") or 60)), 60)
     enable_vnc = _parse_bool(_get_env("ENABLE_VNC"), default=True)
 
     return Config(

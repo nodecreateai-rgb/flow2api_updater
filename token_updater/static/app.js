@@ -945,20 +945,30 @@ async function saveConfig(button) {
         return;
     }
 
-    const payload = {flow2api_url: url, refresh_interval: refreshInterval};
+    const payload = {
+        flow2api_url: url,
+        refresh_interval: refreshInterval,
+        apply_to_all_profiles: true,
+        validate_connection: true,
+    };
     if (connectionToken) {
         payload.connection_token = connectionToken;
     }
 
-    await withButton(button, "保存中...", async () => {
-        await json(`${API}/api/config`, {
+    await withButton(button, "保存并验证中...", async () => {
+        const result = await json(`${API}/api/config`, {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify(payload),
         });
         await refreshDashboard(false, true);
         document.getElementById("config-token").value = "";
-        toast("默认配置已保存", "success");
+        const applied = Number(result?.applied_to_profiles || 0);
+        if (applied > 0) {
+            toast(`默认配置已保存，已应用到 ${applied} 个 profile`, "success");
+        } else {
+            toast("默认配置已保存并通过校验", "success");
+        }
     });
 }
 
