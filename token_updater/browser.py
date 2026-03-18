@@ -467,6 +467,52 @@ class BrowserManager:
                         pass
                 await self._stop_vnc_stack()
 
+    async def recover_session_via_login_cycle(self, profile_id: int, settle_seconds: float = 5.0) -> Dict[str, Any]:
+        """模拟人工恢复流程：点击登录拉起浏览器 -> 等待浏览器稳定 -> 关闭浏览器 -> 再提取 token。"""
+        if not config.enable_vnc:
+            return {"success": False, "error": "VNC 未启用，无法执行浏览器登录恢复流程"}
+
+        profile = await profile_db.get_profile(profile_id)
+        if not profile:
+            return {"success": False, "error": "Profile 不存在"}
+
+        previous_token = None
+        try:
+            previous_token = await self.peek_token(profile_id)
+        except Exception:
+            previous_token = None
+
+        launched = await self.launch_for_login(profile_id)
+        if not launched:
+            return {"success": False, "error": "启动登录浏览器失败"}
+
+        try:
+            await asyncio.sleep(max(settle_seconds, 2.0))
+        finally:
+            close_result = await self.close_browser(profile_id)
+            if not close_result.get("success"):
+                logger.warning(f"[{profile['name']}] 自动关闭登录浏览器失败: {close_result.get('error')}")
+
+        token = await self.extract_token(profile_id)
+        changed = bool(token and (previous_token is None or token != previous_token))
+
+        if token:
+            return {
+                "success": True,
+                "token": token,
+                "changed": changed,
+                "had_previous": bool(previous_token),
+                "close_result": close_result,
+            }
+
+        return {
+            "success": False,
+            "error": "登录浏览器启停恢复后仍无法提取 token",
+            "changed": False,
+            "had_previous": bool(previous_token),
+            "close_result": close_result,
+        }
+
     async def close_browser(self, profile_id: int) -> Dict[str, Any]:
         """关闭浏览器并保存状态"""
         async with self._lock:

@@ -158,19 +158,19 @@ class TokenSyncer:
         result = await self._push_to_flow2api(token, flow2api_url, connection_token)
 
         if (not result.get("success")) and self._is_expired_access_token_error(result.get("error", "")):
-            logger.warning(f"[{profile['name']}] Flow2API 返回 expired access token，自动执行一次 headed 会话激活后重试")
-            activation = await browser_manager.activate_session(profile_id)
+            logger.warning(f"[{profile['name']}] Flow2API 返回 expired access token，自动执行一次登录浏览器启停恢复后重试")
+            activation = await browser_manager.recover_session_via_login_cycle(profile_id)
             if activation.get("success"):
                 retry_token = activation.get("token") or await browser_manager.extract_token(profile_id)
                 if retry_token:
                     result = await self._push_to_flow2api(retry_token, flow2api_url, connection_token)
                     if result.get("success"):
                         msg = result.get("message", "")
-                        result["message"] = f"[auto-reactivated] {msg}".strip()
+                        result["message"] = f"[auto-login-cycle-reactivated] {msg}".strip()
                 else:
-                    result = {"success": False, "error": "自动会话激活后仍无法提取 token"}
+                    result = {"success": False, "error": "自动登录浏览器启停恢复后仍无法提取 token"}
             else:
-                result = {"success": False, "error": f"自动会话激活失败: {activation.get('error', 'unknown')}"}
+                result = {"success": False, "error": f"自动登录浏览器启停恢复失败: {activation.get('error', 'unknown')}"}
 
         if result["success"]:
             await profile_db.update_profile(
