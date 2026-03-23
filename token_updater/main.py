@@ -25,7 +25,7 @@ async def scheduled_sync():
         logger.warning("没有启用中的 Profile，跳过本次同步")
         return
 
-    await token_syncer.sync_all_profiles()
+    await token_syncer.sync_all_profiles(source="scheduled")
 
 
 async def startup():

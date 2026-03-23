@@ -10,6 +10,7 @@ from .browser import browser_manager
 from .config import config
 from .database import profile_db
 from .events import dashboard_events
+from .execution import execution_gate
 from .logger import logger
 
 
@@ -166,9 +167,17 @@ class TokenSyncer:
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
-    async def sync_profile(self, profile_id: int) -> Dict[str, Any]:
+    async def sync_profile(self, profile_id: int, *, source: str = "manual") -> Dict[str, Any]:
+        profile = await profile_db.get_profile(profile_id)
+        profile_name = profile.get("name", "") if profile else ""
         async with self._sync_lock:
-            return await self._sync_profile(profile_id)
+            async with execution_gate.hold(
+                "sync_profile",
+                profile_id=profile_id,
+                profile_name=profile_name,
+                source=source,
+            ):
+                return await self._sync_profile(profile_id)
 
     async def _sync_profile(self, profile_id: int) -> Dict[str, Any]:
         """同步单个 Profile。"""
@@ -249,130 +258,131 @@ class TokenSyncer:
 
         return {**result, "target_url": flow2api_url}
 
-    async def sync_all_profiles(self) -> Dict[str, Any]:
+    async def sync_all_profiles(self, *, source: str = "manual") -> Dict[str, Any]:
         """同步所有活跃 Profile（智能模式：按目标地址分组刷新）。"""
         async with self._sync_lock:
-            logger.info("=" * 40)
-            logger.info("开始智能同步...")
+            async with execution_gate.hold("sync_all", source=source):
+                logger.info("=" * 40)
+                logger.info("开始智能同步...")
 
-            self._last_batch_time = datetime.now()
-            profiles = await profile_db.get_active_profiles()
+                self._last_batch_time = datetime.now()
+                profiles = await profile_db.get_active_profiles()
 
-            if not profiles:
-                result = {"success": True, "total": 0, "synced": 0, "skipped": 0, "results": []}
+                if not profiles:
+                    result = {"success": True, "total": 0, "synced": 0, "skipped": 0, "results": []}
+                    await dashboard_events.publish("sync_batch", result)
+                    return result
+
+                grouped_profiles: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+                invalid_profiles: List[Dict[str, Any]] = []
+
+                for profile in profiles:
+                    flow2api_url, connection_token = self._resolve_target(profile)
+                    if not flow2api_url or not connection_token:
+                        invalid_profiles.append(profile)
+                        continue
+                    grouped_profiles[(flow2api_url, connection_token)].append(profile)
+
+                results: List[Dict[str, Any]] = []
+                success_count = 0
+                error_count = 0
+                skipped_count = 0
+                now = datetime.now()
+
+                for profile in invalid_profiles:
+                    flow2api_url, _ = self._resolve_target(profile)
+                    error = "未配置完整的 Flow2API 地址或连接 Token"
+                    await self._update_profile_check_result(
+                        profile["id"],
+                        f"failed: {error}",
+                        last_sync_time=datetime.now().isoformat(),
+                        last_sync_result=f"failed: {error}",
+                        error_count=profile.get("error_count", 0) + 1,
+                    )
+                    self._total_error_count += 1
+                    await self._record_sync_result(profile, flow2api_url, False, message=error)
+                    results.append(
+                        {
+                            "profile_id": profile["id"],
+                            "profile_name": profile["name"],
+                            "success": False,
+                            "error": error,
+                            "target_url": flow2api_url,
+                        }
+                    )
+                    error_count += 1
+
+                for (flow2api_url, connection_token), target_profiles in grouped_profiles.items():
+                    profile_emails = [profile["email"] for profile in target_profiles if profile.get("email")]
+                    check_result = await self._check_tokens_status(
+                        flow2api_url,
+                        connection_token,
+                        profile_emails or None,
+                    )
+
+                    if not check_result["success"]:
+                        logger.warning(
+                            f"[{flow2api_url}] 无法查询 token 状态: {check_result.get('error')}，回退到该目标全量同步"
+                        )
+                        group_result = await self._sync_profiles_force(target_profiles)
+                        results.extend(group_result["results"])
+                        success_count += group_result["success_count"]
+                        error_count += group_result["error_count"]
+                        continue
+
+                    token_lookup = {
+                        self._normalize_email(token.get("email")): token
+                        for token in check_result.get("tokens", [])
+                        if self._normalize_email(token.get("email"))
+                    }
+
+                    for profile in target_profiles:
+                        should_sync, reason = self._should_sync_profile(profile, token_lookup, now=now)
+                        if should_sync:
+                            logger.info(f"[{profile['name']}] 满足同步条件: {reason}")
+                            result = await self._sync_profile(profile["id"])
+                            results.append(
+                                {
+                                    "profile_id": profile["id"],
+                                    "profile_name": profile["name"],
+                                    **result,
+                                }
+                            )
+                            if result["success"]:
+                                success_count += 1
+                            else:
+                                error_count += 1
+                        else:
+                            skipped_count += 1
+                            logger.info(f"[{profile['name']}] {reason}，跳过")
+                            await self._update_profile_check_result(
+                                profile["id"],
+                                f"skipped: {reason}",
+                                checked_at=now.isoformat(),
+                            )
+                            await self._record_sync_result(
+                                profile,
+                                flow2api_url,
+                                action="skipped",
+                                message=reason,
+                                status="skipped",
+                            )
+
+                logger.info(
+                    f"智能同步完成: 成功 {success_count}, 失败 {error_count}, 跳过 {skipped_count}"
+                )
+
+                result = {
+                    "success": True,
+                    "total": len(profiles),
+                    "synced": success_count + error_count,
+                    "success_count": success_count,
+                    "error_count": error_count,
+                    "skipped": skipped_count,
+                    "results": results,
+                }
                 await dashboard_events.publish("sync_batch", result)
                 return result
-
-            grouped_profiles: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
-            invalid_profiles: List[Dict[str, Any]] = []
-
-            for profile in profiles:
-                flow2api_url, connection_token = self._resolve_target(profile)
-                if not flow2api_url or not connection_token:
-                    invalid_profiles.append(profile)
-                    continue
-                grouped_profiles[(flow2api_url, connection_token)].append(profile)
-
-            results: List[Dict[str, Any]] = []
-            success_count = 0
-            error_count = 0
-            skipped_count = 0
-            now = datetime.now()
-
-            for profile in invalid_profiles:
-                flow2api_url, _ = self._resolve_target(profile)
-                error = "未配置完整的 Flow2API 地址或连接 Token"
-                await self._update_profile_check_result(
-                    profile["id"],
-                    f"failed: {error}",
-                    last_sync_time=datetime.now().isoformat(),
-                    last_sync_result=f"failed: {error}",
-                    error_count=profile.get("error_count", 0) + 1,
-                )
-                self._total_error_count += 1
-                await self._record_sync_result(profile, flow2api_url, False, message=error)
-                results.append(
-                    {
-                        "profile_id": profile["id"],
-                        "profile_name": profile["name"],
-                        "success": False,
-                        "error": error,
-                        "target_url": flow2api_url,
-                    }
-                )
-                error_count += 1
-
-            for (flow2api_url, connection_token), target_profiles in grouped_profiles.items():
-                profile_emails = [profile["email"] for profile in target_profiles if profile.get("email")]
-                check_result = await self._check_tokens_status(
-                    flow2api_url,
-                    connection_token,
-                    profile_emails or None,
-                )
-
-                if not check_result["success"]:
-                    logger.warning(
-                        f"[{flow2api_url}] 无法查询 token 状态: {check_result.get('error')}，回退到该目标全量同步"
-                    )
-                    group_result = await self._sync_profiles_force(target_profiles)
-                    results.extend(group_result["results"])
-                    success_count += group_result["success_count"]
-                    error_count += group_result["error_count"]
-                    continue
-
-                token_lookup = {
-                    self._normalize_email(token.get("email")): token
-                    for token in check_result.get("tokens", [])
-                    if self._normalize_email(token.get("email"))
-                }
-
-                for profile in target_profiles:
-                    should_sync, reason = self._should_sync_profile(profile, token_lookup, now=now)
-                    if should_sync:
-                        logger.info(f"[{profile['name']}] 满足同步条件: {reason}")
-                        result = await self._sync_profile(profile["id"])
-                        results.append(
-                            {
-                                "profile_id": profile["id"],
-                                "profile_name": profile["name"],
-                                **result,
-                            }
-                        )
-                        if result["success"]:
-                            success_count += 1
-                        else:
-                            error_count += 1
-                    else:
-                        skipped_count += 1
-                        logger.info(f"[{profile['name']}] {reason}，跳过")
-                        await self._update_profile_check_result(
-                            profile["id"],
-                            f"skipped: {reason}",
-                            checked_at=now.isoformat(),
-                        )
-                        await self._record_sync_result(
-                            profile,
-                            flow2api_url,
-                            action="skipped",
-                            message=reason,
-                            status="skipped",
-                        )
-
-            logger.info(
-                f"智能同步完成: 成功 {success_count}, 失败 {error_count}, 跳过 {skipped_count}"
-            )
-
-            result = {
-                "success": True,
-                "total": len(profiles),
-                "synced": success_count + error_count,
-                "success_count": success_count,
-                "error_count": error_count,
-                "skipped": skipped_count,
-                "results": results,
-            }
-            await dashboard_events.publish("sync_batch", result)
-            return result
 
     async def _sync_profiles_force(self, profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
         """强制同步指定 Profile 列表。"""

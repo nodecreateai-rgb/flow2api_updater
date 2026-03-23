@@ -52,6 +52,32 @@ BROWSER_ARGS = [
 LOGIN_BROWSER_ARGS = BROWSER_ARGS[:6] + ["--disable-blink-features=AutomationControlled"]
 
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font", "stylesheet"}
+EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+BUTTON_CANDIDATE_SELECTORS = "button, [role='button'], input[type='submit'], input[type='button'], a[role='button'], cr-button"
+ACCOUNT_INPUT_SELECTORS = [
+    "#identifierId",
+    "input[name='identifier']",
+    "input[autocomplete='username']",
+    "input[autocomplete='email']",
+    "input[type='email']",
+    "input[type='tel']",
+]
+PASSWORD_INPUT_SELECTORS = [
+    "input[name='Passwd']",
+    "input[autocomplete='current-password']",
+    "input[autocomplete='password']",
+    "input[type='password']",
+]
+ACCOUNT_SUBMIT_SELECTORS = [
+    "#identifierNext",
+    "#identifierNext button",
+    "[id='identifierNext'] button",
+]
+PASSWORD_SUBMIT_SELECTORS = [
+    "#passwordNext",
+    "#passwordNext button",
+    "[id='passwordNext'] button",
+]
 
 SUPERVISOR_CONF = "/etc/supervisor/conf.d/supervisord.conf"
 VNC_START_ORDER = ("xvfb", "fluxbox", "x11vnc", "novnc")
@@ -168,6 +194,32 @@ class BrowserManager:
             return token or ""
         return f"{token[:4]}...{token[-4:]}"
 
+    def _normalize_email(self, value: str) -> str:
+        return str(value or "").strip().lower()
+
+    def _extract_email_from_text(self, text: str) -> Optional[str]:
+        content = str(text or "")
+        for match in EMAIL_PATTERN.findall(content):
+            normalized = self._normalize_email(match)
+            if normalized:
+                return normalized
+        return None
+
+    def _resolve_known_email(self, profile: Dict[str, Any], body_text: str = "") -> Optional[str]:
+        stored_email = self._normalize_email(str(profile.get("email") or ""))
+        if stored_email:
+            return stored_email
+
+        page_email = self._extract_email_from_text(body_text)
+        if page_email:
+            return page_email
+
+        login_account = self._normalize_email(str(profile.get("login_account") or ""))
+        if login_account and EMAIL_PATTERN.fullmatch(login_account):
+            return login_account
+
+        return None
+
     async def _get_proxy(self, profile: Dict[str, Any]) -> Optional[Dict]:
         """获取代理配置"""
         if profile.get("proxy_enabled") and profile.get("proxy_url"):
@@ -187,6 +239,75 @@ class BrowserManager:
         except Exception:
             return ""
 
+    def _text_contains_any(self, text: str, patterns: List[str]) -> bool:
+        lowered = str(text or "").lower()
+        if not lowered:
+            return False
+        return any(str(pattern or "").strip().lower() in lowered for pattern in patterns if str(pattern or "").strip())
+
+    async def _get_locator_search_text(self, locator) -> str:
+        parts: List[str] = []
+
+        try:
+            parts.append(str(await locator.inner_text(timeout=1000) or ""))
+        except Exception:
+            pass
+
+        try:
+            parts.append(str(await locator.text_content(timeout=1000) or ""))
+        except Exception:
+            pass
+
+        for attr in ("value", "aria-label", "title", "name", "data-identifier", "data-email"):
+            try:
+                parts.append(str(await locator.get_attribute(attr) or ""))
+            except Exception:
+                pass
+
+        return " ".join(part.strip() for part in parts if str(part or "").strip())
+
+    async def _click_first_visible(self, page, selectors: List[str]) -> bool:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() <= 0 or not await locator.is_visible():
+                    continue
+                await locator.click(timeout=5000)
+                await asyncio.sleep(1)
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _has_visible_selector(self, page, selectors: List[str]) -> bool:
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() > 0 and await locator.is_visible():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _wait_for_page_progress(
+        self,
+        page,
+        previous_url: str,
+        current_selectors: List[str],
+        success_selectors: Optional[List[str]] = None,
+        attempts: int = 5,
+    ) -> bool:
+        success_selectors = success_selectors or []
+        for _ in range(max(1, attempts)):
+            if str(page.url or "") != previous_url:
+                return True
+            if success_selectors and await self._has_visible_selector(page, success_selectors):
+                return True
+            if current_selectors and not await self._has_visible_selector(page, current_selectors):
+                return True
+            await asyncio.sleep(0.4)
+        return False
+
     async def _click_button_by_text(self, page, patterns: List[str]) -> bool:
         escaped = [re.escape(str(pattern or "").strip()) for pattern in patterns if str(pattern or "").strip()]
         if not escaped:
@@ -194,8 +315,8 @@ class BrowserManager:
 
         regex = re.compile("|".join(escaped), re.IGNORECASE)
         try:
-            candidates = page.locator("button, [role='button'], input[type='submit'], input[type='button']")
-            count = min(await candidates.count(), 60)
+            candidates = page.locator(BUTTON_CANDIDATE_SELECTORS)
+            count = min(await candidates.count(), 100)
         except Exception:
             return False
 
@@ -204,13 +325,7 @@ class BrowserManager:
                 locator = candidates.nth(index)
                 if not await locator.is_visible():
                     continue
-                label = ""
-                try:
-                    label = str(await locator.inner_text(timeout=1000) or "").strip()
-                except Exception:
-                    label = ""
-                if not label:
-                    label = str(await locator.get_attribute("value") or "").strip()
+                label = str(await self._get_locator_search_text(locator) or "").strip()
                 if not label or not regex.search(label):
                     continue
                 await locator.click(timeout=5000)
@@ -226,6 +341,18 @@ class BrowserManager:
             if not text:
                 continue
             try:
+                candidate_buttons = page.locator(BUTTON_CANDIDATE_SELECTORS)
+                count = min(await candidate_buttons.count(), 40)
+                for index in range(count):
+                    locator = candidate_buttons.nth(index)
+                    if not await locator.is_visible():
+                        continue
+                    label = str(await self._get_locator_search_text(locator) or "").strip()
+                    if text.lower() not in label.lower():
+                        continue
+                    await locator.click(timeout=5000)
+                    await asyncio.sleep(1)
+                    return True
                 locator = page.get_by_text(text, exact=False).first
                 if await locator.count() <= 0:
                     continue
@@ -238,28 +365,48 @@ class BrowserManager:
                 continue
         return False
 
-    async def _fill_and_submit_first_visible(self, page, selectors: List[str], value: str) -> bool:
+    async def _fill_and_submit_first_visible(
+        self,
+        page,
+        selectors: List[str],
+        value: str,
+        *,
+        submit_selectors: Optional[List[str]] = None,
+        submit_patterns: Optional[List[str]] = None,
+        success_selectors: Optional[List[str]] = None,
+    ) -> bool:
         if not str(value or "").strip():
             return False
+
+        submit_selectors = submit_selectors or []
+        submit_patterns = submit_patterns or []
+        success_selectors = success_selectors or []
 
         for selector in selectors:
             try:
                 locator = page.locator(selector).first
                 if await locator.count() <= 0 or not await locator.is_visible():
                     continue
+                previous_url = str(page.url or "")
                 await locator.click(timeout=5000)
                 await locator.fill("", timeout=5000)
                 await locator.fill(value, timeout=5000)
                 await asyncio.sleep(0.4)
+
                 try:
                     await locator.press("Enter", timeout=3000)
-                    await asyncio.sleep(1)
-                    return True
+                    if await self._wait_for_page_progress(page, previous_url, selectors, success_selectors):
+                        return True
                 except Exception:
                     pass
-                if await self._click_button_by_text(page, ["下一步", "Next", "继续", "Continue"]):
-                    return True
-                return True
+
+                if submit_selectors and await self._click_first_visible(page, submit_selectors):
+                    if await self._wait_for_page_progress(page, previous_url, selectors, success_selectors):
+                        return True
+
+                if submit_patterns and await self._click_button_by_text(page, submit_patterns):
+                    if await self._wait_for_page_progress(page, previous_url, selectors, success_selectors):
+                        return True
             except Exception:
                 continue
         return False
@@ -325,21 +472,192 @@ class BrowserManager:
                 return message
         return None
 
+    async def _click_account_choice(self, page, login_account: str) -> bool:
+        normalized_account = self._normalize_email(login_account or "")
+        if not normalized_account:
+            return False
+
+        attr_selectors = [
+            f'[data-identifier="{normalized_account}"]',
+            f'[data-email="{normalized_account}"]',
+        ]
+        if await self._click_first_visible(page, attr_selectors):
+            return True
+
+        try:
+            candidates = page.locator("button, [role='button'], li, div[data-identifier], div[data-email]")
+            count = min(await candidates.count(), 80)
+        except Exception:
+            count = 0
+
+        for index in range(count):
+            try:
+                locator = candidates.nth(index)
+                if not await locator.is_visible():
+                    continue
+                label = self._normalize_email(await self._get_locator_search_text(locator))
+                if normalized_account not in label:
+                    continue
+                await locator.click(timeout=5000)
+                await asyncio.sleep(1)
+                return True
+            except Exception:
+                continue
+
+        return await self._click_text_if_visible(page, [login_account])
+
+    async def _handle_chromium_signin_prompt(self, page, body_text: str) -> bool:
+        text = str(body_text or "")
+        markers = [
+            "Sign in to Chromium",
+            "登录 Chromium",
+            "Set up a work profile",
+            "设置工作资料",
+            "Use Chromium without an account",
+            "Continue as",
+        ]
+        if not self._text_contains_any(text, markers):
+            return False
+
+        if await self._click_button_by_text(page, ["Continue as", "继续作为", "以此身份继续", "Continue"]):
+            return True
+        if await self._click_button_by_text(
+            page,
+            ["Use Chromium without an account", "不使用账号", "不使用帳號", "暂不登录", "以后再说", "Not now"],
+        ):
+            return True
+        return False
+
+    async def _handle_managed_profile_prompt(self, page, body_text: str) -> bool:
+        text = str(body_text or "")
+        markers = [
+            "Continue to work in this profile",
+            "This profile will be managed",
+            "Your organization manages this profile",
+            "Create a work profile",
+            "Separate browsing for work",
+            "You're signing in with a managed account",
+            "Set up your new profile",
+            "此资料将受到管理",
+            "该资料将受到管理",
+        ]
+        if not self._text_contains_any(text, markers):
+            return False
+
+        return await self._click_button_by_text(
+            page,
+            [
+                "Continue to work in this profile",
+                "Continue",
+                "继续",
+                "I understand",
+                "我了解",
+                "我瞭解",
+                "Confirm",
+                "确认",
+                "Create profile",
+                "创建资料",
+            ],
+        )
+
+    async def _handle_profile_data_choice_prompt(self, page, body_text: str) -> bool:
+        text = str(body_text or "")
+        markers = [
+            "How do you want to handle your existing browsing data",
+            "Keep existing browsing data separate",
+            "Continue using this profile",
+            "Use existing data",
+            "Create new profile",
+            "您想如何处理现有的资料数据",
+        ]
+        if not self._text_contains_any(text, markers):
+            return False
+
+        if await self._click_text_if_visible(
+            page,
+            [
+                "Continue using this profile",
+                "Use existing data",
+                "Keep existing browsing data separate",
+                "继续使用此资料",
+                "继续使用这个资料",
+            ],
+        ):
+            return True
+
+        return await self._click_button_by_text(
+            page,
+            ["Continue", "继续", "Confirm", "确认", "Create new profile", "创建新资料"],
+        )
+
+    async def _handle_browser_settings_prompts(self, page, body_text: str) -> bool:
+        text = str(body_text or "")
+
+        positive_markers = [
+            "Turn on sync",
+            "Sync and personalize",
+            "Save and continue",
+            "Sync your stuff",
+            "Save time by syncing",
+            "开启同步",
+            "同步和个性化",
+            "保存并继续",
+        ]
+        dismiss_markers = [
+            "Make Chrome your default browser",
+            "Make Chromium your default browser",
+            "Help improve Chrome",
+            "Help improve Chromium",
+            "Import bookmarks and settings",
+            "Set as default",
+            "默认浏览器",
+            "导入书签",
+            "帮助改进",
+        ]
+
+        if self._text_contains_any(text, positive_markers):
+            return await self._click_button_by_text(
+                page,
+                [
+                    "Save and continue",
+                    "Yes, I'm in",
+                    "Turn on sync",
+                    "Continue",
+                    "继续",
+                    "保存并继续",
+                    "开启同步",
+                ],
+            )
+
+        if self._text_contains_any(text, dismiss_markers):
+            return await self._click_button_by_text(
+                page,
+                ["Not now", "No thanks", "Skip", "以后再说", "暂不", "跳过"],
+            )
+
+        return False
+
     async def _advance_google_login(self, page, login_account: str, login_password: str) -> bool:
         if await self._click_button_by_text(page, ["Use another account", "使用其他账号", "使用其他帳戶"]):
             return True
-        if await self._click_text_if_visible(page, [login_account]):
+        if await self._click_account_choice(page, login_account):
             return True
         if await self._fill_and_submit_first_visible(
             page,
-            ["#identifierId", "input[name='identifier']", "input[type='email']"],
+            ACCOUNT_INPUT_SELECTORS,
             login_account,
+            submit_selectors=ACCOUNT_SUBMIT_SELECTORS,
+            submit_patterns=["下一步", "Next", "继续", "Continue"],
+            success_selectors=PASSWORD_INPUT_SELECTORS,
         ):
             return True
         if await self._fill_and_submit_first_visible(
             page,
-            ["input[name='Passwd']", "input[type='password']"],
+            PASSWORD_INPUT_SELECTORS,
             login_password,
+            submit_selectors=PASSWORD_SUBMIT_SELECTORS,
+            submit_patterns=["下一步", "Next", "继续", "Continue", "登录", "Sign in"],
+            success_selectors=["[href*='labs.google']", "[data-test-id='profile-menu-button']"],
         ):
             return True
         return False
@@ -405,53 +723,53 @@ class BrowserManager:
             return False
 
         acted = False
-        for _ in range(3):
+        sequences = [
+            ("enter",),
+            ("tab", "enter"),
+            ("shift+tab", "enter"),
+            ("esc",),
+        ]
+        for sequence in sequences:
             try:
-                pyautogui.press("enter")
+                for key in sequence:
+                    if key == "shift+tab":
+                        pyautogui.hotkey("shift", "tab")
+                    else:
+                        pyautogui.press(key)
+                    await asyncio.sleep(0.8)
                 acted = True
             except Exception:
                 return acted
-            await asyncio.sleep(1.2)
         return acted
 
     async def _handle_managed_account_prompts(self, page, body_text: str) -> bool:
-        text = str(body_text or "")
-        lowered_text = text.lower()
-
         if await self._click_button_by_text(page, ["Sign in with Google"]):
             return True
 
-        chrome_signin_markers = [
-            "登录 Chrome",
-            "Sign in to Chrome",
-            "Sign in Chrome",
-        ]
-        if any(marker.lower() in lowered_text for marker in chrome_signin_markers):
-            if await self._click_button_by_text(page, ["身份继续", "Continue as", "继续"]):
-                return True
+        if await self._handle_chromium_signin_prompt(page, body_text):
+            return True
+        if await self._handle_managed_profile_prompt(page, body_text):
+            return True
+        if await self._handle_profile_data_choice_prompt(page, body_text):
+            return True
+        if await self._handle_browser_settings_prompts(page, body_text):
+            return True
 
-        managed_profile_markers = [
-            "Continue to work in this profile",
-            "此资料将受到管理",
-            "This profile will be managed",
-            "我瞭解",
-            "我了解",
-            "I understand",
-        ]
-        if any(marker.lower() in lowered_text for marker in managed_profile_markers):
-            if await self._click_button_by_text(page, ["继续", "Continue", "我了解", "我瞭解", "I understand", "确认", "Confirm"]):
-                return True
-
-        profile_data_markers = [
-            "您想如何处理现有的资料数据",
-            "How do you want to handle your existing browsing data",
-        ]
-        if any(marker.lower() in lowered_text for marker in profile_data_markers):
-            await self._click_text_if_visible(page, ["继续使用此资料", "Continue using this profile"])
-            if await self._click_button_by_text(page, ["确认", "Confirm", "继续", "Continue"]):
-                return True
-
-        if await self._click_button_by_text(page, ["Continue to work in this profile", "我瞭解", "我了解", "I understand", "确认", "Confirm", "继续", "Continue"]):
+        if await self._click_button_by_text(
+            page,
+            [
+                "Continue to work in this profile",
+                "Continue as",
+                "Save and continue",
+                "我瞭解",
+                "我了解",
+                "I understand",
+                "确认",
+                "Confirm",
+                "继续",
+                "Continue",
+            ],
+        ):
             return True
 
         return False
@@ -480,6 +798,10 @@ class BrowserManager:
             "隐私权政策",
             "Privacy Policy",
             "Your data and labs.google/fx",
+            "Welcome to",
+            "Get started",
+            "Start using",
+            "Introducing",
         ]
         if any(marker.lower() in text.lower() for marker in onboarding_markers):
             try:
@@ -487,7 +809,10 @@ class BrowserManager:
             except Exception:
                 pass
             await asyncio.sleep(0.5)
-            if await self._click_button_by_text(page, ["继续", "Continue", "同意", "Agree", "下一步", "Next"]):
+            if await self._click_button_by_text(
+                page,
+                ["继续", "Continue", "同意", "Agree", "下一步", "Next", "Got it", "Done", "Skip", "Accept", "Start", "OK"],
+            ):
                 return True
 
         return False
@@ -506,6 +831,13 @@ class BrowserManager:
             "查看我们的《隐私权政策》",
             "Privacy Policy",
             "登录 Chrome",
+            "Sign in to Chromium",
+            "Set up a work profile",
+            "Use Chromium without an account",
+            "Continue to work in this profile",
+            "How do you want to handle your existing browsing data",
+            "Turn on sync",
+            "Save and continue",
             "Sign in with Google",
             "Too many failed attempts",
         ]
@@ -513,7 +845,7 @@ class BrowserManager:
             return False
 
         try:
-            if await page.locator("#identifierId, input[name='Passwd'], input[name='identifier']").count() > 0:
+            if await page.locator(", ".join(ACCOUNT_INPUT_SELECTORS + PASSWORD_INPUT_SELECTORS)).count() > 0:
                 return False
         except Exception:
             return False
@@ -530,9 +862,10 @@ class BrowserManager:
 
             body_text = await self._safe_page_text(page)
 
-            if await self._is_labs_session_ready(page, body_text):
-                logger.info(f"[{profile['name']}] labs 会话页面已就绪")
-                break
+            if native_prompt_attempts < 3 and not str(body_text or "").strip() and await self._handle_native_chrome_profile_prompts():
+                native_prompt_attempts += 1
+                logger.info(f"[{profile['name']}] 已处理 Chromium 原生资料提示")
+                continue
 
             if await self._handle_managed_account_prompts(page, body_text):
                 logger.info(f"[{profile['name']}] 已处理 Google / 资料确认提示")
@@ -542,10 +875,9 @@ class BrowserManager:
                 logger.info(f"[{profile['name']}] 已处理 labs 首次引导")
                 continue
 
-            if native_prompt_attempts < 3 and await self._handle_native_chrome_profile_prompts():
-                native_prompt_attempts += 1
-                logger.info(f"[{profile['name']}] 已处理 Chromium 原生资料提示")
-                continue
+            if await self._is_labs_session_ready(page, body_text):
+                logger.info(f"[{profile['name']}] labs 会话页面已就绪")
+                break
 
             await asyncio.sleep(1.0)
 
@@ -563,13 +895,32 @@ class BrowserManager:
             except Exception:
                 pass
             token = await self._get_session_cookie(context)
+
+        if token:
+            for _ in range(4):
+                body_text = await self._safe_page_text(page)
+                if await self._handle_managed_account_prompts(page, body_text):
+                    continue
+                if await self._handle_labs_onboarding(page, body_text):
+                    continue
+                break
         return token
 
-    async def _persist_login_state(self, profile_id: int, token: Optional[str]) -> None:
-        update_data: Dict[str, Any] = {"is_logged_in": 1 if token else 0}
+    async def _persist_login_state(
+        self,
+        profile_id: int,
+        token: Optional[str],
+        email: Optional[str] = None,
+        is_logged_in: Optional[bool] = None,
+    ) -> None:
+        logged_in = bool(token) if is_logged_in is None else bool(is_logged_in)
+        update_data: Dict[str, Any] = {"is_logged_in": 1 if logged_in else 0}
         if token:
             update_data["last_token"] = self._mask_token(token)
             update_data["last_token_time"] = datetime.now().isoformat()
+        normalized_email = self._normalize_email(email or "")
+        if normalized_email:
+            update_data["email"] = normalized_email
         await profile_db.update_profile(profile_id, **update_data)
 
     def _parse_cookies_payload(self, cookies_json: str) -> List[Dict[str, Any]]:
@@ -694,7 +1045,11 @@ class BrowserManager:
                 await context.add_cookies(cookies)
                 token = await self._get_session_cookie(context)
 
-                await self._persist_login_state(profile_id, token)
+                await self._persist_login_state(
+                    profile_id,
+                    token,
+                    email=self._resolve_known_email(profile),
+                )
 
                 return {
                     "success": True,
@@ -772,13 +1127,19 @@ class BrowserManager:
             if self._active_context:
                 # 检查登录状态
                 is_logged_in = False
+                profile = await profile_db.get_profile(profile_id)
                 try:
                     cookies = await self._active_context.cookies("https://labs.google")
                     is_logged_in = any(c["name"] == config.session_cookie_name for c in cookies)
                 except Exception:
                     pass
 
-                await profile_db.update_profile(profile_id, is_logged_in=int(is_logged_in))
+                await self._persist_login_state(
+                    profile_id,
+                    None,
+                    email=self._resolve_known_email(profile or {}),
+                    is_logged_in=is_logged_in,
+                )
                 await self._close_active()
                 await self._stop_vnc_stack()
 
@@ -856,8 +1217,13 @@ class BrowserManager:
             await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=60000)
 
             token = await self._settle_labs_session(profile, context, page)
+            body_text = await self._safe_page_text(page)
 
-            await self._persist_login_state(profile["id"], token)
+            await self._persist_login_state(
+                profile["id"],
+                token,
+                email=self._resolve_known_email(profile, body_text),
+            )
             if token:
                 logger.info(f"[{profile['name']}] Token 提取成功")
             else:
@@ -927,28 +1293,37 @@ class BrowserManager:
                     body_text = await self._safe_page_text(page)
                     blocker = self._detect_login_blocker(body_text)
                     if blocker:
-                        await self._persist_login_state(profile_id, None)
+                        await self._persist_login_state(
+                            profile_id,
+                            None,
+                            email=self._resolve_known_email(profile, body_text),
+                        )
                         return {"success": False, "error": blocker, "requires_manual_action": True}
 
-                    if await self._is_labs_session_ready(page, body_text):
-                        break
-
-                    if await self._advance_google_login(page, login_account, login_password):
+                    if use_vnc and not str(body_text or "").strip() and await self._handle_native_chrome_profile_prompts():
                         continue
 
                     if await self._handle_managed_account_prompts(page, body_text):
                         continue
 
+                    if await self._advance_google_login(page, login_account, login_password):
+                        continue
+
                     if await self._handle_labs_onboarding(page, body_text):
                         continue
 
-                    if use_vnc and await self._handle_native_chrome_profile_prompts():
-                        continue
+                    if await self._is_labs_session_ready(page, body_text):
+                        break
 
                     await asyncio.sleep(1.0)
 
                 token = await self._settle_labs_session(profile, context, page)
-                await self._persist_login_state(profile_id, token)
+                body_text = await self._safe_page_text(page)
+                await self._persist_login_state(
+                    profile_id,
+                    token,
+                    email=self._resolve_known_email(profile, body_text),
+                )
                 if not token:
                     return {"success": False, "error": "未获取到会话令牌，请改用手动登录"}
 
@@ -983,7 +1358,11 @@ class BrowserManager:
             return {"success": False, "error": "Profile 不存在"}
 
         token = await self.peek_token(profile_id)
-        await profile_db.update_profile(profile_id, is_logged_in=1 if token else 0)
+        await self._persist_login_state(
+            profile_id,
+            token,
+            email=self._resolve_known_email(profile),
+        )
         return {
             "success": True,
             "is_logged_in": token is not None,

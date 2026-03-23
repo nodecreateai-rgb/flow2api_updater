@@ -447,6 +447,9 @@ body {
 
 .btn {
     appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border: 1px solid transparent;
     border-radius: 12px;
     padding: 11px 16px;
@@ -477,6 +480,10 @@ body {
 .btn.danger { background: rgba(251, 113, 133, 0.14); border-color: rgba(251, 113, 133, 0.2); color: #ffc4d1; }
 .btn.ghost { background: rgba(148, 163, 184, 0.08); border-color: rgba(148, 163, 184, 0.18); }
 .btn.small { padding: 9px 12px; font-size: 13px; }
+
+.profile-footer .btn.small {
+    min-width: 82px;
+}
 
 .field {
     display: flex;
