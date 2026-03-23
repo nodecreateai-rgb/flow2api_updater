@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime
@@ -11,6 +12,21 @@ from .config import config
 from .database import profile_db
 from .proxy_utils import parse_proxy, format_proxy_for_playwright
 from .logger import logger
+
+try:
+    import pyautogui
+    import pygetwindow as pygetwindow
+    import win32con
+    import win32gui
+
+    pyautogui.FAILSAFE = False
+    DESKTOP_AUTOMATION_AVAILABLE = True
+except Exception:
+    pyautogui = None
+    pygetwindow = None
+    win32con = None
+    win32gui = None
+    DESKTOP_AUTOMATION_AVAILABLE = False
 
 
 # 内存优化参数
@@ -161,6 +177,224 @@ class BrowserManager:
                 logger.info(f"[{profile['name']}] 使用代理: {proxy['server']}")
                 return proxy
         return None
+
+    async def _safe_page_text(self, page) -> str:
+        try:
+            body = page.locator("body").first
+            if await body.count() <= 0:
+                return ""
+            return str(await body.inner_text(timeout=2000) or "")
+        except Exception:
+            return ""
+
+    async def _click_button_by_text(self, page, patterns: List[str]) -> bool:
+        escaped = [re.escape(str(pattern or "").strip()) for pattern in patterns if str(pattern or "").strip()]
+        if not escaped:
+            return False
+
+        regex = re.compile("|".join(escaped), re.IGNORECASE)
+        try:
+            candidates = page.locator("button, [role='button'], input[type='submit'], input[type='button']")
+            count = min(await candidates.count(), 60)
+        except Exception:
+            return False
+
+        for index in range(count):
+            try:
+                locator = candidates.nth(index)
+                if not await locator.is_visible():
+                    continue
+                label = ""
+                try:
+                    label = str(await locator.inner_text(timeout=1000) or "").strip()
+                except Exception:
+                    label = ""
+                if not label:
+                    label = str(await locator.get_attribute("value") or "").strip()
+                if not label or not regex.search(label):
+                    continue
+                await locator.click(timeout=5000)
+                await asyncio.sleep(1)
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _click_text_if_visible(self, page, patterns: List[str]) -> bool:
+        for pattern in patterns:
+            text = str(pattern or "").strip()
+            if not text:
+                continue
+            try:
+                locator = page.get_by_text(text, exact=False).first
+                if await locator.count() <= 0:
+                    continue
+                if not await locator.is_visible():
+                    continue
+                await locator.click(timeout=5000)
+                await asyncio.sleep(1)
+                return True
+            except Exception:
+                continue
+        return False
+
+    async def _focus_browser_window_for_native_prompt(self) -> bool:
+        if os.name != "nt" or not DESKTOP_AUTOMATION_AVAILABLE or pygetwindow is None:
+            return False
+
+        title_keywords = [
+            "Flow - Chromium",
+            "Chromium",
+            "Google Chrome",
+        ]
+        for keyword in title_keywords:
+            try:
+                windows = [window for window in pygetwindow.getWindowsWithTitle(keyword) if getattr(window, "title", "")]
+            except Exception:
+                continue
+            if not windows:
+                continue
+
+            window = windows[0]
+            hwnd = getattr(window, "_hWnd", None)
+            try:
+                window.restore()
+            except Exception:
+                pass
+            try:
+                window.activate()
+            except Exception:
+                if hwnd and win32gui is not None and win32con is not None:
+                    try:
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        win32gui.SetForegroundWindow(hwnd)
+                    except Exception:
+                        pass
+            await asyncio.sleep(0.8)
+            return True
+        return False
+
+    async def _handle_native_chrome_profile_prompts(self) -> bool:
+        if os.name != "nt" or not DESKTOP_AUTOMATION_AVAILABLE or pyautogui is None:
+            return False
+        if not await self._focus_browser_window_for_native_prompt():
+            return False
+
+        acted = False
+        for _ in range(3):
+            try:
+                pyautogui.press("enter")
+                acted = True
+            except Exception:
+                return acted
+            await asyncio.sleep(1.2)
+        return acted
+
+    async def _handle_managed_account_prompts(self, page, body_text: str) -> bool:
+        text = str(body_text or "")
+        lowered_text = text.lower()
+
+        if await self._click_button_by_text(page, ["Sign in with Google"]):
+            return True
+
+        chrome_signin_markers = [
+            "登录 Chrome",
+            "Sign in to Chrome",
+            "Sign in Chrome",
+        ]
+        if any(marker.lower() in lowered_text for marker in chrome_signin_markers):
+            if await self._click_button_by_text(page, ["身份继续", "Continue as", "继续"]):
+                return True
+
+        managed_profile_markers = [
+            "Continue to work in this profile",
+            "此资料将受到管理",
+            "This profile will be managed",
+            "我瞭解",
+            "我了解",
+            "I understand",
+        ]
+        if any(marker.lower() in lowered_text for marker in managed_profile_markers):
+            if await self._click_button_by_text(page, ["继续", "Continue", "我了解", "我瞭解", "I understand", "确认", "Confirm"]):
+                return True
+
+        profile_data_markers = [
+            "您想如何处理现有的资料数据",
+            "How do you want to handle your existing browsing data",
+        ]
+        if any(marker.lower() in lowered_text for marker in profile_data_markers):
+            await self._click_text_if_visible(page, ["继续使用此资料", "Continue using this profile"])
+            if await self._click_button_by_text(page, ["确认", "Confirm", "继续", "Continue"]):
+                return True
+
+        if await self._click_button_by_text(page, ["Continue to work in this profile", "我瞭解", "我了解", "I understand", "确认", "Confirm", "继续", "Continue"]):
+            return True
+
+        return False
+
+    async def _handle_labs_onboarding(self, page, body_text: str) -> bool:
+        text = str(body_text or "")
+        if await page.locator("#marketing-emails").count() > 0 or await page.locator("#research-emails").count() > 0:
+            for selector in ("#marketing-emails", "#research-emails"):
+                try:
+                    checkbox = page.locator(selector).first
+                    if await checkbox.count() <= 0 or not await checkbox.is_visible():
+                        continue
+                    checked = str(await checkbox.get_attribute("aria-checked") or "").strip().lower() == "true"
+                    if not checked:
+                        await checkbox.click(timeout=5000)
+                        await asyncio.sleep(0.3)
+                except Exception:
+                    continue
+            if await self._click_button_by_text(page, ["下一步", "Next", "继续", "Continue"]):
+                return True
+
+        onboarding_markers = [
+            "体验 AI 工具的创造力",
+            "Experience the creativity",
+            "查看我们的《隐私权政策》",
+            "隐私权政策",
+            "Privacy Policy",
+            "Your data and labs.google/fx",
+        ]
+        if any(marker.lower() in text.lower() for marker in onboarding_markers):
+            try:
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+            if await self._click_button_by_text(page, ["继续", "Continue", "同意", "Agree", "下一步", "Next"]):
+                return True
+
+        return False
+
+    async def _is_labs_session_ready(self, page, body_text: str) -> bool:
+        url = str(page.url or "").lower()
+        if "labs.google" not in url:
+            return False
+        if "accounts.google.com" in url:
+            return False
+
+        text = str(body_text or "")
+        blocked_markers = [
+            "体验 AI 工具的创造力",
+            "Experience the creativity",
+            "查看我们的《隐私权政策》",
+            "Privacy Policy",
+            "登录 Chrome",
+            "Sign in with Google",
+            "Too many failed attempts",
+        ]
+        if any(marker.lower() in text.lower() for marker in blocked_markers):
+            return False
+
+        try:
+            if await page.locator("#identifierId, input[name='Passwd'], input[name='identifier']").count() > 0:
+                return False
+        except Exception:
+            return False
+
+        return True
 
     def _parse_cookies_payload(self, cookies_json: str) -> List[Dict[str, Any]]:
         data = json.loads(cookies_json)
@@ -462,25 +696,37 @@ class BrowserManager:
             except Exception:
                 pass
 
-            # 访问 signin 页面并点击 Sign in with Google 按钮刷新 session
+            # 访问 labs 页面，必要时自动推进 Google / 托管资料 / labs 首次引导。
             logger.info(f"[{profile['name']}] 访问 {config.labs_url} 刷新 session...")
             await page.goto(config.labs_url, wait_until="domcontentloaded", timeout=60000)
 
-            # 点击 Sign in with Google 按钮（提交 POST 表单）
-            try:
-                submit_btn = page.locator("button[type='submit']")
-                await submit_btn.wait_for(state="visible", timeout=10000)
-                await submit_btn.click()
-                logger.info(f"[{profile['name']}] 已点击 Sign in with Google，等待跳转...")
-            except Exception as e:
-                logger.warning(f"[{profile['name']}] 点击登录按钮失败: {e}，尝试直接检查 cookie")
+            native_prompt_attempts = 0
+            for _ in range(40):
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=3000)
+                except Exception:
+                    pass
 
-            # 等待跳转到 https://labs.google/ 并提取 cookie
-            try:
-                await page.wait_for_url("https://labs.google/**", timeout=30000)
-                logger.info(f"[{profile['name']}] 已成功跳转到 labs.google")
-            except Exception as e:
-                logger.warning(f"[{profile['name']}] 等待跳转超时: {e}")
+                body_text = await self._safe_page_text(page)
+
+                if await self._is_labs_session_ready(page, body_text):
+                    logger.info(f"[{profile['name']}] labs 会话页面已就绪")
+                    break
+
+                if await self._handle_managed_account_prompts(page, body_text):
+                    logger.info(f"[{profile['name']}] 已处理 Google / 资料确认提示")
+                    continue
+
+                if await self._handle_labs_onboarding(page, body_text):
+                    logger.info(f"[{profile['name']}] 已处理 labs 首次引导")
+                    continue
+
+                if native_prompt_attempts < 3 and await self._handle_native_chrome_profile_prompts():
+                    native_prompt_attempts += 1
+                    logger.info(f"[{profile['name']}] 已处理 Chromium 原生资料提示")
+                    continue
+
+                await asyncio.sleep(1.0)
 
             # 等待 cookie 更新：优先轮询 session cookie，减少资源占用
             token = await self._get_session_cookie(context)
