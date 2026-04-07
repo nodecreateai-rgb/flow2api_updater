@@ -1097,6 +1097,65 @@ class BrowserManager:
                     except Exception:
                         pass
 
+    async def export_cookies(self, profile_id: int) -> Dict[str, Any]:
+        """导出 labs.google 域名 Cookie，格式与导入接口兼容。"""
+        async with self._lock:
+            profile = await profile_db.get_profile(profile_id)
+            if not profile:
+                return {"success": False, "error": "Profile 不存在"}
+
+            context = None
+            try:
+                if self._active_profile_id == profile_id and self._active_context:
+                    cookies = await self._active_context.cookies("https://labs.google")
+                else:
+                    profile_dir = self._get_profile_dir(profile_id)
+                    if not os.path.exists(profile_dir):
+                        return {"success": False, "error": "无持久化数据，请先登录或导入会话数据"}
+
+                    if not self._playwright:
+                        await self.start()
+
+                    self._clean_locks(profile_dir)
+                    proxy = await self._get_proxy(profile)
+                    context = await self._playwright.chromium.launch_persistent_context(
+                        user_data_dir=profile_dir,
+                        headless=True,
+                        viewport={"width": 1024, "height": 768},
+                        locale="en-US",
+                        timezone_id="America/New_York",
+                        proxy=proxy,
+                        args=BROWSER_ARGS,
+                        ignore_default_args=["--enable-automation"],
+                    )
+                    cookies = await context.cookies("https://labs.google")
+
+                if not cookies:
+                    return {"success": False, "error": "当前账号暂无可导出的 Cookie"}
+
+                return {
+                    "success": True,
+                    "kind": "session",
+                    "source": "active_context" if self._active_profile_id == profile_id and self._active_context else "browser_profile",
+                    "profile_id": profile_id,
+                    "profile_name": profile.get("name") or "",
+                    "cookies": cookies,
+                    "cookie_count": len(cookies),
+                    "count": len(cookies),
+                    "cookies_json": json.dumps(cookies, ensure_ascii=False, indent=2),
+                    "has_token": any(c.get("name") == config.session_cookie_name for c in cookies),
+                }
+
+            except Exception as e:
+                logger.error(f"[{profile['name']}] Cookie 导出失败: {e}")
+                return {"success": False, "error": str(e)}
+            finally:
+                if context:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+
     async def launch_for_login(self, profile_id: int) -> bool:
         """启动浏览器用于 VNC 登录（非 headless）"""
         if not config.enable_vnc:

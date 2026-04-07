@@ -27,6 +27,49 @@ class ProfileCredentialHelperTests(unittest.TestCase):
         with self.assertRaises(api.HTTPException):
             api._resolve_login_credentials("", "", "alpha@example.com", None)
 
+    def test_normalize_cookie_export_kind_supports_aliases(self):
+        self.assertEqual(api._normalize_cookie_export_kind("session"), "session")
+        self.assertEqual(api._normalize_cookie_export_kind("labs"), "session")
+        self.assertEqual(api._normalize_cookie_export_kind("google"), "google")
+        self.assertEqual(api._normalize_cookie_export_kind("protocol"), "google")
+
+    def test_normalize_cookie_export_kind_rejects_unknown_kind(self):
+        with self.assertRaises(api.HTTPException) as ctx:
+            api._normalize_cookie_export_kind("unknown")
+
+        self.assertIn("session / google", str(ctx.exception.detail))
+
+    def test_build_google_cookie_export_preserves_structured_cookie_items(self):
+        profile = {
+            "id": 3,
+            "name": "alpha",
+            "google_cookies": '[{"name":"SID","value":"aaa","domain":".google.com"},{"name":"HSID","value":"bbb","domain":"accounts.google.com"}]',
+        }
+
+        data = api._build_google_cookie_export(profile)
+
+        self.assertTrue(data["success"])
+        self.assertEqual(data["profile_id"], 3)
+        self.assertEqual(data["kind"], "google")
+        self.assertEqual(data["cookie_count"], 2)
+        self.assertEqual(data["filename"], "profile-3-google-cookies.json")
+        self.assertEqual(data["cookies"][0]["domain"], ".google.com")
+        self.assertIn('"name": "SID"', data["cookies_json"])
+
+    def test_build_google_cookie_export_supports_plain_text_cookie_string(self):
+        profile = {
+            "id": 8,
+            "name": "beta",
+            "google_cookies": "SID=aaa; HSID=bbb; SAPISID=ccc",
+        }
+
+        data = api._build_google_cookie_export(profile)
+
+        self.assertEqual(data["profile_id"], 8)
+        self.assertEqual(data["cookie_count"], 3)
+        self.assertEqual(data["cookies"][1]["name"], "HSID")
+        self.assertEqual(data["cookies"][2]["value"], "ccc")
+
     def test_serialize_profile_masks_password_by_default(self):
         profile = {
             "id": 7,

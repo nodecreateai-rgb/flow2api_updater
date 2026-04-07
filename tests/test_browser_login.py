@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from token_updater.browser import BrowserManager
+from token_updater.config import config
 
 
 class BrowserLoginHelperTests(unittest.IsolatedAsyncioTestCase):
@@ -81,6 +82,51 @@ class BrowserLoginHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["is_logged_in"], 1)
         self.assertEqual(kwargs["email"], "alpha@example.com")
         self.assertIn("last_token", kwargs)
+
+    async def test_export_cookies_uses_active_context(self):
+        profile = {
+            "id": 1,
+            "name": "alpha",
+            "proxy_enabled": 0,
+            "proxy_url": "",
+        }
+        cookies = [
+            {
+                "name": config.session_cookie_name,
+                "value": "secret-token",
+                "domain": ".labs.google",
+                "path": "/",
+            }
+        ]
+        context = AsyncMock()
+        context.cookies = AsyncMock(return_value=cookies)
+        self.manager._active_profile_id = 1
+        self.manager._active_context = context
+
+        with patch("token_updater.browser.profile_db.get_profile", AsyncMock(return_value=profile)):
+            result = await self.manager.export_cookies(1)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["count"], 1)
+        self.assertTrue(result["has_token"])
+        context.cookies.assert_awaited_once_with("https://labs.google")
+
+    async def test_export_cookies_requires_profile_data(self):
+        profile = {
+            "id": 2,
+            "name": "beta",
+            "proxy_enabled": 0,
+            "proxy_url": "",
+        }
+
+        with patch("token_updater.browser.profile_db.get_profile", AsyncMock(return_value=profile)), patch(
+            "token_updater.browser.os.path.exists",
+            return_value=False,
+        ):
+            result = await self.manager.export_cookies(2)
+
+        self.assertFalse(result["success"])
+        self.assertIn("无持久化数据", result["error"])
 
 
 if __name__ == "__main__":

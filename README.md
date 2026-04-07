@@ -192,6 +192,7 @@ docker compose up -d --build
 - `POST /api/profiles/{id}/close`
 - `POST /api/profiles/{id}/check-login`
 - `POST /api/profiles/{id}/import-cookies`
+- `GET /api/profiles/{id}/export-cookies?kind=session|google`
 - `POST /api/profiles/{id}/extract`
 - `POST /api/profiles/{id}/sync`
 - `POST /api/sync-all`

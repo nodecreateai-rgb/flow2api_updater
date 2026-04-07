@@ -550,6 +550,84 @@ class ImportAccountsRequest(BaseModel):
     update_existing: bool = True
 
 
+def _normalize_cookie_export_kind(kind: str | None) -> str:
+    normalized = str(kind or "session").strip().lower()
+    if normalized in {"session", "labs"}:
+        return "session"
+    if normalized in {"google", "protocol"}:
+        return "google"
+    raise HTTPException(400, "Cookie 导出类型仅支持 session / google")
+
+
+def _build_cookie_export_filename(profile_id: int, kind: str) -> str:
+    return f"profile-{profile_id}-{kind}-cookies.json"
+
+
+def _parse_google_cookie_export(raw: str) -> List[Dict[str, Any]]:
+    import json as _json
+
+    text = (raw or "").strip()
+    if not text:
+        return []
+
+    try:
+        data = _json.loads(text)
+    except (_json.JSONDecodeError, ValueError):
+        data = None
+
+    cookies: List[Dict[str, Any]] = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and item.get("name") and item.get("value") is not None:
+                cookies.append(dict(item))
+        return cookies
+
+    if isinstance(data, dict):
+        if data.get("name") and data.get("value") is not None:
+            return [dict(data)]
+
+        cookie_list = data.get("cookies")
+        if isinstance(cookie_list, list):
+            for item in cookie_list:
+                if isinstance(item, dict) and item.get("name") and item.get("value") is not None:
+                    cookies.append(dict(item))
+            return cookies
+
+        for name, value in data.items():
+            if isinstance(value, str) and value:
+                cookies.append({"name": str(name), "value": value})
+        return cookies
+
+    from .protocol_login import _parse_google_cookies
+
+    parsed = _parse_google_cookies(text)
+    return [{"name": name, "value": value} for name, value in parsed.items()]
+
+
+def _build_google_cookie_export(profile: Dict[str, Any]) -> Dict[str, Any]:
+    import json as _json
+
+    raw = (profile.get("google_cookies") or "").strip()
+    if not raw:
+        raise HTTPException(404, "当前账号没有可导出的 Google Cookies")
+
+    cookies = _parse_google_cookie_export(raw)
+    if not cookies:
+        raise HTTPException(400, "当前账号保存的 Google Cookies 无法解析")
+
+    return {
+        "success": True,
+        "profile_id": profile["id"],
+        "profile_name": profile.get("name") or "",
+        "kind": "google",
+        "source": "database",
+        "cookie_count": len(cookies),
+        "cookies": cookies,
+        "cookies_json": _json.dumps(cookies, ensure_ascii=False, indent=2),
+        "filename": _build_cookie_export_filename(profile["id"], "google"),
+    }
+
+
 async def verify_session(authorization: str = Header(None)):
     if not config.admin_password:
         return "anonymous"
@@ -860,6 +938,34 @@ async def import_cookies(profile_id: int, request: ImportCookiesRequest, token: 
     if not result.get("success"):
         raise HTTPException(400, result.get("error") or "导入失败")
     await dashboard_events.publish("cookies_imported", {"profile_id": profile_id})
+    return result
+
+
+@app.get("/api/profiles/{profile_id}/export-cookies")
+async def export_cookies(
+    profile_id: int,
+    kind: str = Query("session", description="session|google"),
+    token: str = Depends(verify_session),
+):
+    profile = await profile_db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(404, "不存在")
+
+    export_kind = _normalize_cookie_export_kind(kind)
+    if export_kind == "google":
+        return _build_google_cookie_export(profile)
+
+    async with execution_gate.hold(
+        "export_cookies",
+        profile_id=profile_id,
+        profile_name=profile.get("name", ""),
+    ):
+        result = await browser_manager.export_cookies(profile_id)
+    if not result.get("success"):
+        error = result.get("error") or "导出失败"
+        status_code = 404 if any(marker in error for marker in ("没有", "无持久化数据", "不存在", "未找到")) else 400
+        raise HTTPException(status_code, error)
+    result["filename"] = _build_cookie_export_filename(profile_id, "session")
     return result
 
 

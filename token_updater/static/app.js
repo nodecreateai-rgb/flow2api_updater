@@ -620,6 +620,7 @@ const ICONS = {
     play: '<svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"></path></svg>',
     square: '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>',
     shield: '<svg viewBox="0 0 24 24"><path d="M12 3 6 6v5c0 4.5 2.9 8.6 6 10 3.1-1.4 6-5.5 6-10V6z"></path><path d="m9.5 12 1.7 1.7 3.3-3.7"></path></svg>',
+    download: '<svg viewBox="0 0 24 24"><path d="M12 4v10"></path><path d="m7 10 5 5 5-5"></path><path d="M4 20h16"></path></svg>',
     cookie: '<svg viewBox="0 0 24 24"><path d="M20 13.5A6.5 6.5 0 1 1 10.5 4a3.5 3.5 0 0 0 4.5 4.5 3.5 3.5 0 0 0 4.5 5Z"></path><path d="M8.5 10h.01"></path><path d="M12 14h.01"></path><path d="M15.5 11h.01"></path></svg>',
     key: '<svg viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="3.5"></circle><path d="M11 15.5h10"></path><path d="M18 12.5v6"></path><path d="M14.5 12.5v6"></path></svg>',
     edit: '<svg viewBox="0 0 24 24"><path d="M12 20h9"></path><path d="m16.5 3.5 4 4L8 20l-5 1 1-5z"></path></svg>',
@@ -1423,9 +1424,9 @@ function openCookieModal(profileId) {
         <div class="modal-card modal-compact">
             <div class="modal-head">
                 <div>
-                    <span class="eyebrow">导入会话数据</span>
-                    <h3 class="modal-title">快速恢复登录态</h3>
-                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 导入 Cookie JSON 后，系统会写入持久化浏览器资料并自动刷新 session。</p>
+                    <span class="eyebrow">会话数据管理</span>
+                    <h3 class="modal-title">导入或导出当前登录态</h3>
+                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 导入 Cookie JSON 后，系统会写入持久化浏览器资料并自动刷新 session。也可以直接导出当前账号的 labs.google Cookie 作为备份。</p>
                 </div>
                 <button class="btn ghost icon-only" onclick="closeModal()" title="关闭">${renderIcon("x")}</button>
             </div>
@@ -1435,6 +1436,7 @@ function openCookieModal(profileId) {
             </div>
             <div class="modal-actions">
                 <button class="btn outline" onclick="closeModal()">取消</button>
+                <button class="btn secondary" ${getBrowserLockAttrs()} onclick="exportCookies(this, 'session')">${renderIcon("download")} 导出当前会话</button>
                 <button class="btn primary" ${getBrowserLockAttrs()} onclick="submitCookies(this)">导入会话数据</button>
             </div>
         </div>
@@ -1448,9 +1450,9 @@ function openProtocolLoginModal(profileId) {
         <div class="modal-card modal-compact">
             <div class="modal-head">
                 <div>
-                    <span class="eyebrow">协议登录</span>
-                    <h3 class="modal-title">纯 HTTP 登录</h3>
-                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 执行纯 HTTP 登录，无需启动浏览器。</p>
+                    <span class="eyebrow">协议 Cookie 管理</span>
+                    <h3 class="modal-title">导入或导出 Google Cookies</h3>
+                    <p class="modal-copy">为 <strong>${escapeHtml(profile.name || "当前账号")}</strong> 执行纯 HTTP 登录，无需启动浏览器。也可以导出当前账号已保存的 Google Cookies 进行备份或迁移。</p>
                 </div>
                 <button class="btn ghost icon-only" onclick="closeModal()" title="关闭">${renderIcon("x")}</button>
             </div>
@@ -1461,6 +1463,7 @@ function openProtocolLoginModal(profileId) {
             </div>
             <div class="modal-actions">
                 <button class="btn outline" onclick="closeModal()">取消</button>
+                <button class="btn secondary" onclick="exportCookies(this, 'google')">${renderIcon("download")} 导出当前 Google Cookies</button>
                 <button class="btn primary" ${getBrowserLockAttrs()} onclick="submitProtocolLogin(this)">协议登录</button>
             </div>
         </div>
@@ -1484,6 +1487,30 @@ async function submitCookies(button) {
         closeModal(true);
         await refreshDashboard(false, true);
         toast(data.has_token ? "导入成功，已检测到会话令牌" : "已导入，但暂未检测到会话令牌", data.has_token ? "success" : "error");
+    });
+}
+
+async function exportCookies(button, kind = "session") {
+    const modal = state.modal || {};
+    const textareaId = kind === "google" ? "google-cookies" : "cookie-json";
+
+    await withOperationLock(button, "导出中...", {action: "export_cookies", label: "导出 Cookie", profile_id: modal.profileId}, async () => {
+        const data = await json(`${API}/api/profiles/${modal.profileId}/export-cookies?kind=${encodeURIComponent(kind)}`);
+        const formatted = String(data.cookies_json || "");
+        if (!formatted) {
+            throw new Error("未获取到可导出的 Cookie 内容");
+        }
+        const textarea = document.getElementById(textareaId);
+        if (textarea) {
+            textarea.value = formatted;
+        }
+        const filename = data.filename || `profile-${modal.profileId}-${kind}-cookies.json`;
+        downloadTextFile(filename, formatted);
+        const count = Number(data.cookie_count ?? data.count ?? 0);
+        const successMessage = kind === "google"
+            ? `已导出 ${count} 条 Google Cookie`
+            : (data.has_token ? `已导出 ${count} 条 Cookie，包含会话令牌` : `已导出 ${count} 条 Cookie`);
+        toast(successMessage, "success");
     });
 }
 
@@ -1710,6 +1737,18 @@ function delay(ms) {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function downloadTextFile(filename, content) {
+    const blob = new Blob([content], {type: "application/json;charset=utf-8"});
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function formatDate(value) {
     if (!value) {
         return "暂无记录";
@@ -1757,6 +1796,7 @@ window.submitCredentialImport = submitCredentialImport;
 window.openCookieModal = openCookieModal;
 window.openProtocolLoginModal = openProtocolLoginModal;
 window.submitCookies = submitCookies;
+window.exportCookies = exportCookies;
 window.submitProtocolLogin = submitProtocolLogin;
 window.syncAll = syncAll;
 window.syncProfile = syncProfile;
